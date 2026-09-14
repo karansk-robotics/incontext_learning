@@ -1,0 +1,286 @@
+# syntax=docker/dockerfile:1
+#
+# ICRT + ROS 2 (rmw_zenoh) — x86_64 Blackwell:
+#   B200 (sm_100), RTX PRO 6000 Blackwell / RTX 50-series (sm_120).
+# sm_120 is NATIVELY compiled in the NGC base (no PTX JIT, unlike GB10's
+# sm_121), so first-kernel latency here is better than on the Spark.
+#
+# Built via ../container.sh, which selects this file from `uname -m` and passes
+# BASE_IMAGE / ROS_DISTRO through docker-compose.yml.
+#
+# Same NGC base as the arm64 file — it is multi-arch, so both platforms build
+# from one tag. sm_100 and sm_120 are natively compiled in (no PTX JIT here,
+# unlike GB10). ROS 2 is layered on top rather than torch onto a ROS image.
+
+
+#
+# Verified against the NGC registry (2026-09-14):
+#   25.11-py3  CUDA 13.0.2 | torch 2.10.0a0 | Ubuntu 24.04 noble | Python 3.12
+#              TORCH_CUDA_ARCH_LIST = 8.0 8.6 9.0 10.0 11.0 12.0+PTX
+#              built against driver 580.95.05 (match to the x86 host's own driver)
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.11-py3
+FROM ${BASE_IMAGE}
+
+ARG ROS_DISTRO=jazzy
+# Set to 1 to add the LeRobot dataset-conversion stack (training host only).
+ARG INSTALL_DATA_DEPS=0
+
+ENV ROS_DISTRO=${ROS_DISTRO} \
+    DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    RMW_IMPLEMENTATION=rmw_zenoh_cpp \
+    PIP_BREAK_SYSTEM_PACKAGES=1
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# --- ROS 2 -------------------------------------------------------------------
+# Codename is derived from /etc/os-release rather than hardcoded, so this
+# self-corrects if the NGC base ever moves off noble.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl gnupg2 lsb-release software-properties-common ca-certificates \
+        iproute2 iputils-ping \
+    && curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+        -o /usr/share/keyrings/ros-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
+http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" \
+        > /etc/apt/sources.list.d/ros2.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        ros-${ROS_DISTRO}-ros-base \
+        ros-${ROS_DISTRO}-rmw-zenoh-cpp \
+        ros-${ROS_DISTRO}-message-filters \
+        ros-${ROS_DISTRO}-control-msgs \
+        ros-${ROS_DISTRO}-trajectory-msgs \
+        ros-${ROS_DISTRO}-sensor-msgs \
+        ros-dev-tools \
+        ffmpeg libgl1 libglib2.0-0 git git-lfs \
+    && git lfs install \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- HPC-X UCX precedence (defence in depth) ---------------------------------
+# Ubuntu's libucx0 shadows HPC-X's UCX: Ubuntu's libucs.so.0 does not export
+# ucs_config_doc_nop, which HPC-X's libucc.so.1 needs, and NGC's torch links
+# libucc — so `import torch` dies with:
+#     ImportError: /opt/hpcx/ucc/lib/libucc.so.1: undefined symbol: ucs_config_doc_nop
+# Reproduced on the clean base with a bare `apt-get install libucx0`.
+#
+# The apt list above no longer pulls libucx0 (dropping cv-bridge et al removed
+# the opencv -> hdf5 -> openmpi -> libucx0 chain; verified by apt --dry-run:
+# zero libucx0/libopenmpi/python3-opencv packages). This layer is kept anyway:
+# it costs one ldconfig, and it means adding an innocuous-looking ROS package
+# later cannot silently break `import torch` three layers further down.
+RUN echo /opt/hpcx/ucx/lib > /etc/ld.so.conf.d/000-hpcx-ucx.conf && ldconfig \
+ && python -c "import torch; print('torch imports after apt layer:', torch.__version__)"
+
+# --- cyclo_control build deps (opt-in) ---------------------------------------
+# The QP/IK controller from ROBOTIS' cyclo_control. Behind a build arg for the
+# same reason as the LeRobot stack: the robot needs it at execution time,
+# dataset conversion never does.
+#
+# All five dependencies resolve from apt on BOTH arches (verified against
+# packages.ros.org, noble):
+#   ros-jazzy-pinocchio 4.1.0, ros-jazzy-osqp-vendor 0.2.0,
+#   ros-jazzy-ament-cmake-vendor-package 2.5.6, libeigen3-dev, python3-nlopt
+# osqp_eigen_vendor is NOT on apt but is vendored inside the cyclo_control repo
+# itself -- cyclo_control_ci.repos only pulls robotis_interfaces, which the
+# solver core does not need.
+#
+# The core links NO rclcpp (its CMakeLists finds only Eigen3, pinocchio,
+# osqp_eigen_vendor and the ament build tooling), so this is a small layer:
+# 2 packages, ~25 s, 1.8 MB installed. Build it with `container.sh build-control`.
+ARG INSTALL_CONTROL_DEPS=0
+RUN if [ "${INSTALL_CONTROL_DEPS}" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            ros-${ROS_DISTRO}-pinocchio \
+            ros-${ROS_DISTRO}-osqp-vendor \
+            ros-${ROS_DISTRO}-ament-cmake-vendor-package \
+            libeigen3-dev python3-nlopt \
+        && rm -rf /var/lib/apt/lists/* \
+        && echo "cyclo_control build deps installed"; \
+    else \
+        echo "skipping cyclo_control deps (build with --build-arg INSTALL_CONTROL_DEPS=1)"; \
+    fi
+
+# --- pip guard ---------------------------------------------------------------
+# THE failure mode for this image: something in the dependency graph declares
+# `torch>=X`, pip decides NVIDIA's 2.10.0a0 pre-release doesn't satisfy it, and
+# silently replaces a CUDA build carrying sm_110/sm_120 kernels with a generic
+# PyPI wheel. Pinning the as-shipped versions as a global constraint makes that
+# an ERROR instead of a silent swap. PIP_CONSTRAINT is honoured by every later
+# pip call too, including ones run by hand inside the container.
+#
+# IMPORTANT: the NGC base ALREADY sets PIP_CONSTRAINT=/etc/pip/constraint.txt
+# (verified in the published image config). Pointing that variable at our own
+# file would silently DISCARD NVIDIA's constraints — exactly the class of quiet
+# dependency clobbering this layer exists to prevent. So we MERGE: seed our file
+# from theirs, then append our pins. A real conflict between the two now fails
+# loudly at build time instead of one side silently winning.
+RUN if [ -f /etc/pip/constraint.txt ]; then \
+        cp /etc/pip/constraint.txt /etc/pip-constraints.txt; \
+        echo "seeded from NVIDIA constraints: $(wc -l < /etc/pip-constraints.txt) lines"; \
+    else \
+        : > /etc/pip-constraints.txt; \
+        echo "no NVIDIA constraint file at /etc/pip/constraint.txt"; \
+    fi
+RUN python - >> /etc/pip-constraints.txt <<'PY'
+import importlib.metadata as md
+for pkg in ("torch", "torchvision", "torchaudio", "numpy", "scipy",
+            "opencv-python", "opencv-python-headless", "pillow",
+            "networkx", "sympy", "typing_extensions"):
+    try:
+        print(f"{pkg}=={md.version(pkg)}")
+    except md.PackageNotFoundError:
+        pass
+PY
+ENV PIP_CONSTRAINT=/etc/pip-constraints.txt
+
+# --- Python deps -------------------------------------------------------------
+COPY docker/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# Converter stack (lerobot pulls a large graph incl. its own torch pin — the
+# constraint file above is what keeps it from touching NVIDIA's build).
+COPY docker/requirements-data.txt /tmp/requirements-data.txt
+RUN if [ "${INSTALL_DATA_DEPS}" = "1" ]; then \
+        pip install --no-cache-dir -r /tmp/requirements-data.txt; \
+    else \
+        echo "skipping data deps (build with --build-arg INSTALL_DATA_DEPS=1)"; \
+    fi \
+ && rm -f /tmp/requirements.txt /tmp/requirements-data.txt
+
+# Assert the guard held. Fails the build rather than shipping a broken torch.
+#
+# torch.version.cuda alone is NOT sufficient. Live counterexample on this robot,
+# robotis/cyclo-intelligence:1.4.0 — measured, with --gpus all:
+#     version.cuda         12.8      passes a version-only check
+#     backends.is_built    True      passes
+#     _is_compiled         True      passes
+#     _cuda_getArchFlags   'sm_87'   <-- THE PROBLEM: Jetson Orin only
+#     is_available         False
+# It is a genuinely CUDA-built torch that targets an architecture this fleet does
+# not have. sm_87 cannot drive GB10 (sm_121), so it is unusable here despite
+# every obvious guard passing. That is the L4T/JetPack-vs-SBSA trap this file's
+# header warns about, in ROBOTIS' own shipped image.
+#
+# DO NOT rewrite this check in terms of torch.cuda.get_arch_list(). Whether that
+# function works without a GPU is a property of the individual torch BUILD, not
+# of the environment:
+#     NGC 2.10.0a0, no GPU  -> []                      (gated on is_available)
+#     PyPI 2.14.0+cu130, no GPU -> full list            (gated on _is_compiled)
+# So it silently starts returning [] on a base-image bump and fails 100% of
+# builds on a perfectly good image. torch._C._cuda_getArchFlags() returned
+# correct flags in every case tested, with and without a GPU. It is the only
+# form of this check that survives changing the base image.
+RUN python - <<'PY'
+import torch
+assert torch.version.cuda, "FATAL: torch lost its CUDA build during pip install"
+# NB: torch.cuda.get_arch_list() is gated on is_available() in NGC's 2.10.0a0 and
+# returns [] whenever no GPU is visible — which is EVERY docker build layer. The
+# raw flags string is read straight out of the binary and works without a GPU.
+# (Measured on the untouched base: get_arch_list() [] but flags
+# 'sm_80 sm_86 sm_90 sm_100 sm_110 sm_120 compute_120'.)
+try:
+    _flags = torch._C._cuda_getArchFlags() or ""
+except Exception:
+    _flags = ""
+archs = _flags.split() or torch.cuda.get_arch_list()
+assert archs, (
+    "FATAL: torch reports CUDA %s but records NO compiled GPU architectures. "
+    "backends.cuda.is_built() does NOT catch this - only the arch flags do."
+    % torch.version.cuda)
+# Blackwell targets: sm_100 = B200, sm_120 = RTX 50xx, compute_120 = the PTX
+# that GB10 (sm_121) JITs from. At least ONE must be present or no Blackwell
+# part in this fleet can run. Deliberately an any-of, not an all-of: the exact
+# spelling of an NGC build's arch list is not something we control.
+blackwell = {"sm_100", "sm_120", "compute_120"}
+assert blackwell & set(archs), (
+    "FATAL: torch has no Blackwell target. Need one of %s, have: %s"
+    % (sorted(blackwell), archs))
+# sm_110 is Jetson Thor only. Warn rather than fail: an image built on the Spark
+# or an x86 host is still perfectly valid, it just cannot be deployed to Thor.
+if "sm_110" not in archs:
+    print("WARNING: no sm_110 in arch list — this image will NOT drive Jetson Thor.")
+print("torch %s / cuda %s / archs %s OK" % (torch.__version__, torch.version.cuda, archs))
+PY
+
+# --- pinocchio parity sidecar ------------------------------------------------
+# tests/test_pinocchio_parity.py checks our hand-written FK against Pinocchio
+# (6.661e-16 m over 400 configurations) — the only evidence in the project that
+# comes from an INDEPENDENT implementation rather than self-consistency.
+#
+# It cannot run in the main interpreter. Every available pinocchio binding —
+# the `pin` wheel AND ros-jazzy-pinocchio — links an eigenpy compiled against
+# NumPy 1.x, while the NGC base ships NumPy 2.1.0. Both fail identically:
+#     ImportError: A module that was compiled using NumPy 1.x cannot be run in
+#                  NumPy 2.1.0
+# Adding `pin` to requirements.txt would install cleanly, satisfy the constraint
+# file, and still not import — a SKIP dressed as a fix.
+#
+# So it gets its own venv with numpy<2. The parity check is pure kinematics and
+# needs no torch, so nothing is lost by isolating it. PIP_CONSTRAINT is escaped
+# deliberately here: this venv exists precisely because it needs a numpy the
+# image pins against, and the constraint correctly refuses that otherwise.
+#
+# pin is PINNED at 2.7.0, and that is forced, not preference: every later
+# release is ResolutionImpossible against numpy<2. Measured, all of them:
+#     pin==4.1.0  impossible      pin==3.7.0  impossible
+#     pin==3.3.1  impossible      pin==2.7.0  RESOLVES
+# An unpinned `pin` here silently resolves to whatever the numpy ceiling allows,
+# which is how one install got 4.1.0 and the next got 2.7.0 an hour apart.
+# Note this means the container cross-checks our FK against pinocchio 2.x while
+# the native run used 4.x. Two independent MAJORS agreeing to 1e-16 is stronger
+# evidence than one, but it should be a recorded fact rather than an accident.
+#   Run with:  ./container.sh parity
+ARG INSTALL_PARITY=1
+RUN if [ "${INSTALL_PARITY}" = "1" ]; then \
+        python -m venv /opt/pinvenv \
+        && PIP_CONSTRAINT= /opt/pinvenv/bin/pip install --no-cache-dir -q \
+             "numpy<2" scipy "pin==2.7.0" pytest \
+        && /opt/pinvenv/bin/python -c "import pinocchio; print('parity sidecar: pinocchio', pinocchio.__version__)"; \
+    else echo "skipping pinocchio parity sidecar"; fi
+
+# ICRT is bind-mounted at /opt/icrt by docker-compose.yml so host edits are live.
+# Copy first so the image stands alone without the mount, then install editable
+# against that path. --no-deps: icrt's pyproject pins nothing and lists a bare
+# `torch`, which pip would otherwise resolve from PyPI.
+COPY third_party/icrt /opt/icrt
+RUN pip install --no-cache-dir --no-deps -e /opt/icrt
+
+WORKDIR /workspace
+# No :$PYTHONPATH suffix — it is undefined at build time and the trailing
+# colon would put the CURRENT DIRECTORY on sys.path at runtime.
+ENV PYTHONPATH=/workspace
+
+# `container.sh enter`/`exec`/`status` use docker exec, which bypasses ENTRYPOINT,
+# so the ROS environment has to come from the shell's own startup files.
+#
+# BOTH of these are required — appending to .bashrc alone is NOT enough:
+#   * interactive shells (`docker exec -it ... bash`) read /root/.bashrc, but
+#     Ubuntu's stock .bashrc returns early on `[ -z "$PS1" ] && return`, so
+#     anything appended BELOW that guard never runs non-interactively.
+#   * login shells (`bash -lc`, which is what exec/status use) read /etc/profile
+#     and therefore /etc/profile.d/*.sh, which has no such guard.
+# Without the profile.d half, `container.sh exec` silently runs with no ros2 on
+# PATH and no rclpy — and `status` reported that as "no nodes / no router",
+# indistinguishable from the legitimate no-router state.
+RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" > /etc/profile.d/ros.sh \
+ && chmod 0644 /etc/profile.d/ros.sh \
+ && echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> /root/.bashrc \
+ && bash -lc 'command -v ros2 >/dev/null' \
+ && echo "ros2 reachable from a login shell"
+
+RUN printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -e' \
+    'source "/opt/ros/${ROS_DISTRO}/setup.bash"' \
+    '[ -f /workspace/install/setup.bash ] && source /workspace/install/setup.bash' \
+    'exec "$@"' > /ros_entrypoint.sh \
+    && chmod +x /ros_entrypoint.sh
+
+# NOTE: ICRT builds its transformer under torch.set_default_tensor_type(
+# cuda.HalfTensor) at third_party/icrt/icrt/models/policy/icrt.py:187, so a GPU
+# must be visible at construction time. compose reserves one for the icrt service.
+#
+# The Zenoh router runs as its own compose service: ros2 run rmw_zenoh_cpp rmw_zenohd
+ENTRYPOINT ["/ros_entrypoint.sh"]
+CMD ["bash"]

@@ -1,0 +1,915 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ICRT × AI Worker</title>
+<style>
+/* ─────────────────────────────────────────────────────────────────────────
+   Design language borrowed from Vuer (vuer.ai) — the 3D visualisation
+   toolkit ROBOTIS uses for AI Worker teleop. Two things taken from it:
+
+     1. The scene is near-black and dominant. #131416 is Vuer's own viewer
+        background (from its `background=131416,fff` parameter) — the one hard
+        colour fact recoverable from the project. Everything else is built
+        around it as a neutral ramp.
+     2. Monochrome chrome, collapsible rail, data carries the only colour.
+        Vuer's docs are black/grey/white with a left sidebar; its viewer floats
+        a collapsible menu over the scene.
+
+   The chart colours are NOT part of this and were not re-picked by eye:
+   #dc2626/#2563eb re-validated against surface #131416 — CVD dE 29.9, normal
+   38.2, contrast >= 3:1, all checks pass. Accent #22d3ee is chrome only,
+   never a series, at 10.2:1 on the scene.
+   ───────────────────────────────────────────────────────────────────────── */
+:root{
+  --scene:#131416;      /* Vuer viewer background */
+  --panel:#1b1d20;      /* lifted surface */
+  --sunken:#0e0f11;     /* wells: log, video */
+  --field:#212429;
+  --line:#2a2e34;
+  --line-soft:#22262b;
+  --ink:#e6e8ea;        /* 15.0:1 on scene */
+  --muted:#8b9299;      /*  5.9:1 on scene */
+  --accent:#22d3ee;     /* 10.2:1 — chrome only */
+  --accent-ink:#06232a;
+  --warn:#f59e0b; --warn-bg:#2a1f08;
+  --err:#f87171; --ok:#4ade80;
+  --rail:54px;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Inter,sans-serif;
+  color-scheme:dark;
+}
+/* Vuer ships a light viewer too (`,fff`); mirror it for daylight use. */
+:root[data-theme="light"]{
+  --scene:#fbfbfa; --panel:#fff; --sunken:#f2f2f0; --field:#fff;
+  --line:#e3e3de; --line-soft:#ededea; --ink:#16181a; --muted:#5f666c;
+  --accent:#0e7490; --accent-ink:#fff; --warn:#8a5a00; --warn-bg:#fff6e0;
+  --err:#b91c1c; --ok:#15803d; color-scheme:light;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--scene);color:var(--ink);
+     font:13.5px/1.55 var(--sans);-webkit-font-smoothing:antialiased}
+
+/* ── shell: fixed rail + scrolling content ─────────────────────────────── */
+body{display:grid;grid-template-columns:var(--rail) 1fr;min-height:100vh}
+.content{grid-column:2;min-width:0;display:flex;flex-direction:column}
+
+nav{grid-column:1;background:var(--panel);border-right:1px solid var(--line);
+    display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:4px;
+    position:sticky;top:0;height:100vh}
+nav button{width:42px;height:42px;border:0;border-radius:10px;background:none;
+    color:var(--muted);font:600 11px var(--mono);cursor:pointer;display:grid;
+    place-items:center;line-height:1.15;transition:background .12s,color .12s}
+nav button small{display:block;font-size:8.5px;font-weight:500;letter-spacing:.04em;
+    opacity:.8;text-transform:uppercase}
+nav button:hover{background:var(--field);color:var(--ink)}
+nav button[aria-selected=true]{background:var(--accent);color:var(--accent-ink)}
+nav .spacer{flex:1}
+nav .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+nav .dot.live{background:var(--ok);box-shadow:0 0 0 4px color-mix(in srgb,var(--ok) 22%,transparent)}
+
+header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+       padding:13px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
+h1{font-size:13.5px;margin:0;font-weight:650;letter-spacing:.01em}
+h1 span{color:var(--muted);font-weight:400}
+.sub{color:var(--muted);font-size:11px;font-family:var(--mono)}
+#gpu{margin-left:auto}
+
+main{display:grid;flex:1;grid-template-columns:minmax(272px,318px) 1fr;
+     gap:16px;padding:16px 18px 26px;align-items:start}
+@media (max-width:900px){
+  body{grid-template-columns:1fr}
+  .content{grid-column:1}
+  nav{grid-column:1;flex-direction:row;height:auto;position:static;
+      border-right:0;border-bottom:1px solid var(--line);padding:8px 12px;overflow-x:auto}
+  nav .spacer{flex:0}
+  main{grid-template-columns:1fr;padding:14px}
+}
+
+/* ── surfaces ──────────────────────────────────────────────────────────── */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+      padding:16px 16px 18px}
+.card h2{font-size:11px;margin:0 0 14px;font-weight:650;letter-spacing:.09em;
+      text-transform:uppercase;color:var(--muted)}
+.card h2 .sub{text-transform:none;letter-spacing:0;margin-left:8px}
+
+label{display:block;margin:11px 0 4px;font-size:11px;color:var(--muted);
+      letter-spacing:.01em}
+label .sub{font-size:10px}
+.cond{margin:12px 0 2px;padding:9px 11px;border-radius:8px;font-size:11.5px;
+      line-height:1.5;border:1px solid var(--line);color:var(--muted)}
+.cond.ok{border-color:var(--ok);color:var(--ok)}
+.cond.warn{border-color:var(--warn);color:var(--warn)}
+.cond.accent{border-color:var(--accent);color:var(--accent)}
+label.check{display:flex;gap:8px;align-items:flex-start;margin:14px 0 2px;
+      font-size:11.5px;color:var(--ink);cursor:pointer;line-height:1.45}
+label.check input{width:auto;margin-top:2px;accent-color:var(--accent)}
+input,select,textarea{width:100%;padding:7px 9px;border:1px solid var(--line);
+      border-radius:7px;background:var(--field);color:var(--ink);
+      font:12px var(--mono);transition:border-color .12s}
+input:focus,select:focus{outline:none;border-color:var(--accent)}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+
+button.go{margin-top:16px;width:100%;padding:10px;border:0;border-radius:8px;
+      background:var(--accent);color:var(--accent-ink);font:650 13px var(--sans);
+      cursor:pointer;letter-spacing:.01em}
+button.go:hover{filter:brightness(1.08)}
+button.go:disabled{opacity:.45;cursor:not-allowed;filter:none}
+button.ghost{background:var(--field);border:1px solid var(--line);color:var(--ink);
+      padding:5px 10px;border-radius:7px;cursor:pointer;font-size:11.5px}
+button.ghost:hover{border-color:var(--accent)}
+
+pre.log{background:var(--sunken);color:#b9bfc5;border:1px solid var(--line);
+      border-radius:9px;padding:12px;font:11.5px/1.5 var(--mono);height:56vh;
+      overflow:auto;margin:0;white-space:pre-wrap;word-break:break-word}
+.warn{background:var(--warn-bg);border:1px solid var(--warn);color:var(--warn);
+      border-radius:9px;padding:11px;margin:11px 0;font-size:12.5px}
+.warn ul{margin:6px 0 0;padding-left:18px}
+.pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:10.5px;
+      font-family:var(--mono);border:1px solid var(--line);color:var(--muted)}
+.pill.running{color:var(--accent);border-color:var(--accent)}
+.pill.failed{color:var(--err);border-color:var(--err)}
+.jobs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:11px}
+.jobs button{font:11px var(--mono)}
+.meta{color:var(--muted);font-size:11px;font-family:var(--mono);margin-top:9px}
+.flat{color:var(--err);font-weight:600}
+.hint{font-size:11.5px;color:var(--muted);margin-top:7px;line-height:1.5}
+
+/* ── the scene: video sits in a well, as in Vuer's viewer ──────────────── */
+#replay video{width:100%;border-radius:9px;background:var(--sunken);
+      border:1px solid var(--line);display:block}
+
+/* ── chart anatomy (dataviz skill) ─────────────────────────────────────── */
+.key{display:inline-block;width:14px;height:2.5px;border-radius:2px;
+      vertical-align:middle;margin-right:5px}
+.charts{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:14px}
+@media (max-width:900px){.charts{grid-template-columns:1fr}}
+.arm{border-left:2px solid var(--arm);padding-left:12px}
+.arm h3{font-size:10px;margin:0 0 10px;font-weight:650;letter-spacing:.1em;
+      color:var(--arm);text-transform:uppercase}
+.ch{margin-bottom:14px}
+.ch b{font-size:10.5px;color:var(--muted);font-weight:600;font-family:var(--mono);
+      display:block;margin-bottom:3px}
+.ch canvas{width:100%;height:66px;display:block;cursor:crosshair;border-radius:6px}
+.ch canvas:focus{outline:2px solid var(--accent);outline-offset:2px}
+
+#r_tip{position:fixed;z-index:50;pointer-events:none;background:var(--panel);
+      border:1px solid var(--line);border-radius:9px;padding:10px 12px;
+      box-shadow:0 10px 34px rgba(0,0,0,.5);font:11.5px var(--mono);min-width:212px}
+.tip-t{color:var(--muted);font-size:10.5px;margin-bottom:7px;
+      border-bottom:1px solid var(--line);padding-bottom:6px}
+.tip-r{display:grid;grid-template-columns:64px 14px 46px 14px 46px;
+      align-items:center;gap:2px;line-height:1.75}
+.tip-k{color:var(--muted)}
+.tip-r b{font-weight:600;text-align:right;color:var(--ink)}
+details summary{cursor:pointer;font-size:11.5px;color:var(--muted);margin-top:14px}
+.tablescroll{overflow:auto;max-height:320px;margin-top:9px}
+#r_table{border-collapse:collapse;font:11px var(--mono);width:100%}
+#r_table th{position:sticky;top:0;background:var(--panel);text-align:right;
+      padding:5px 8px;border-bottom:1px solid var(--line);color:var(--muted);font-weight:600}
+#r_table td{text-align:right;padding:3px 8px;border-bottom:1px solid var(--line-soft)}
+svg.spark{width:100%;height:46px;margin-top:9px;display:block}
+</style>
+</head>
+<body>
+<nav id="tabs" aria-label="Pipeline stages">
+  <button aria-selected="true" data-t="convert"  title="1 · Convert">1<small>conv</small></button>
+  <button data-t="visualize" title="2 · Visualize">2<small>view</small></button>
+  <button data-t="train"     title="3 · Train">3<small>train</small></button>
+  <button data-t="evaluate"  title="4 · Evaluate">4<small>eval</small></button>
+  <div class="spacer"></div>
+  <div class="dot" id="gpudot" title="GPU"></div>
+</nav>
+<div class="content">
+<header>
+  <h1>ICRT <span>×</span> AI Worker</h1>
+  <span class="sub" id="repo"></span>
+  <span class="sub" id="gpu" style="margin-left:auto"></span>
+</header>
+
+<div id="interp"></div>
+
+<main>
+  <div>
+    <!-- CONVERT -->
+    <section class="card pane" id="p-convert">
+      <h2>LeRobot → ICRT</h2>
+      <label>LeRobot source</label>
+      <input id="c_src" list="srcs" placeholder="data/ecu_raw">
+      <datalist id="srcs"></datalist>
+      <label>Output directory</label>
+      <input id="c_out" placeholder="data/icrt_ecu">
+      <div class="row">
+        <div><label>Target FPS</label><input id="c_fps" value="15"></div>
+        <div><label>Limit (blank = all)</label><input id="c_limit" placeholder=""></div>
+      </div>
+      <div class="row">
+        <div><label>Image size</label><input id="c_size" value="180 320"></div>
+        <div><label>Prompt dir</label><input id="c_prompt" placeholder="optional"></div>
+      </div>
+      <label>Camera map (k=v, space separated)</label>
+      <input id="c_cam" placeholder="optional override">
+      <button class="go" data-run="convert">Convert</button>
+      <p class="hint">Auto-detects LeRobot v2.1 and v3.0. Start with a limit of 2–5 to
+         smoke-test before committing to a full run.</p>
+    </section>
+
+    <!-- VISUALIZE -->
+    <section class="card pane" id="p-visualize" hidden>
+      <h2>Inspect a converted episode</h2>
+      <label>Dataset</label><select id="v_ds"></select>
+      <label>Episode</label><select id="v_ep"></select>
+      <div class="row">
+        <div><label>FPS</label><input id="v_fps" value="15"></div>
+        <div><label>Limit frames</label><input id="v_limit" placeholder="optional"></div>
+      </div>
+      <button class="go" data-run="visualize">Render</button>
+      <p class="hint">Look before you train. This screen is how an inverted gripper
+         was caught that 28 passing tests did not.</p>
+      <div class="hint" id="v_note"></div>
+    </section>
+
+    <!-- TRAIN -->
+    <section class="card pane" id="p-train" hidden>
+      <h2>Train</h2>
+      <label>Dataset</label><select id="t_ds"></select>
+      <div id="t_facts" class="meta"></div>
+      <div class="row">
+        <div><label>seq-length <span class="sub">&gt; longest episode</span></label><input id="t_seq" type="number" min="1" step="1" value="512"></div>
+        <div><label>maximum-length</label><input id="t_max" type="number" min="1" step="1" value="1200"></div>
+      </div>
+      <div class="row">
+        <div><label>non-overlapping</label><input id="t_nov" type="number" min="1" step="1" value="256"></div>
+        <div><label>epochs</label><input id="t_ep" type="number" min="1" step="1" value="1"></div>
+      </div>
+      <div class="row">
+        <div><label>batch-size</label><input id="t_bs" type="number" min="1" step="1" value="1"></div>
+        <div><label>accum-iter</label><input id="t_ai" type="number" min="1" step="1" value="2"></div>
+      </div>
+      <div class="row">
+        <div><label>proprio-extra-dim <span class="sub">head×2 + lift</span></label>
+             <input id="t_pex" type="number" min="0" step="1" value="3"></div>
+        <div><label>action-extra-dim <span class="sub">lift</span></label>
+             <input id="t_aex" type="number" min="0" step="1" value="1"></div>
+      </div>
+      <div class="row">
+        <div><label>output-dir</label><input id="t_out" value="output"></div>
+        <div><label>log-name</label><input id="t_name" value="icrt"></div>
+      </div>
+      <label class="check"><input type="checkbox" id="t_rebal">
+        rebalance-tasks <span class="sub">— resamples every task to a common
+        length; pointless on one task, reshapes a real multi-task set</span></label>
+      <div class="hint" id="t_cost"></div>
+      <div id="t_warn"></div>
+      <button class="go" data-run="train">Start training</button>
+    </section>
+
+    <!-- EVALUATE -->
+    <section class="card pane" id="p-evaluate" hidden>
+      <h2>Offline replay</h2>
+      <label>Dataset</label><select id="e_ds"></select>
+      <label>Checkpoint</label><select id="e_ck"></select>
+      <label>train yaml</label><input id="e_yaml" placeholder="auto from checkpoint">
+      <label>Prompt episode <span class="sub">— fills the KV cache</span></label>
+      <select id="e_prompt"></select>
+      <label>Eval episode <span class="sub">— replayed and compared</span></label>
+      <select id="e_eval"></select>
+      <div id="e_cond"></div>
+      <label>Max steps</label><input id="e_steps" placeholder="optional">
+      <button class="go" data-run="evaluate">Run replay</button>
+      <p class="hint">The experiment: run this twice, prompting with a
+         <em>same-task</em> demo and then a <em>different-task</em> demo, and compare.
+         Same-task winning is the paper's central claim.</p>
+      <div class="viz" id="e_out"></div>
+    </section>
+  </div>
+
+  <div>
+  <section class="card" id="replay" hidden style="margin-bottom:16px">
+    <h2>Replay <span class="sub" id="r_title"></span></h2>
+    <video id="r_video" controls muted playsinline
+           style="width:100%;border-radius:6px;background:#000"></video>
+    <div class="meta" id="r_legend"></div>
+    <div class="charts" id="r_charts"></div>
+    <details id="r_tablewrap" hidden>
+      <summary>Table view <span class="sub">— every value, no hover required</span></summary>
+      <div class="tablescroll"><table id="r_table"></table></div>
+    </details>
+  </section>
+
+  <div class="card">
+    <h2>Output</h2>
+    <div class="jobs" id="jobs"></div>
+    <div id="spark"></div>
+    <pre class="log" id="log">No job selected.</pre>
+    <div class="meta" id="logmeta"></div>
+  </div>
+  </div>
+</main>
+</div>
+<div id="r_tip" role="tooltip" hidden></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const n = (sel, dflt, min = 1) => {
+  const v = parseInt($(sel).value, 10);
+  return Number.isFinite(v) && v >= min ? v : dflt;
+};
+let STATE = {datasets:[], sources:[], checkpoints:[], jobs:[]};
+let current = null, offset = 0, follow = true;
+
+/* ---------- tabs ---------- */
+$('#tabs').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  $('#tabs').querySelectorAll('button')
+    .forEach(x => x.setAttribute('aria-selected', x === b));
+  document.querySelectorAll('.pane').forEach(p => p.hidden = p.id !== 'p-' + b.dataset.t);
+});
+
+/* ---------- state ---------- */
+async function refresh() {
+  STATE = await (await fetch('/api/state')).json();
+  $('#repo').textContent = STATE.repo;
+  const G = STATE.gpu || {};
+  $('#gpu').innerHTML = (G.gpus || []).map(g => {
+    const hot = (g.util || 0) > 5;
+    const mem = (g.mem_used != null && g.mem_total)
+      ? ` · ${(g.mem_used / 1024).toFixed(1)}/${(g.mem_total / 1024).toFixed(0)} GB`
+      : ' · mem n/a';
+    return `<span style="color:${hot ? 'var(--ok)' : 'var(--muted)'}">
+      ${hot ? '&#9679;' : '&#9675;'} ${g.name} sm_${(g.compute_cap || '').replace('.', '')}
+      · ${g.util == null ? '?' : g.util}%${mem}
+      · ${g.temp == null ? '?' : g.temp}&deg;C · driver ${g.driver}</span>`;
+  }).join(' ') || '<span style="color:var(--err)">no GPU visible</span>';
+  const dot = $('#gpudot');
+  if (dot) {
+    const busy = (G.gpus || []).some(g => (g.util || 0) > 5);
+    dot.classList.toggle('live', busy);
+    dot.title = (G.gpus || []).map(g => `${g.name} — ${g.util}%`).join(', ') || 'no GPU';
+  }
+  const I = STATE.interpreter || {};
+  $('#interp').innerHTML = I.ok === false
+    ? `<div class="warn" style="margin:12px 16px 0">
+         <strong>This interpreter is missing modules the jobs need.</strong>
+         <ul>${Object.entries(I.breaks||{}).map(([k,v])=>
+           `<li><code>${k}</code> — breaks ${v}</li>`).join('')}</ul>
+         Jobs are spawned with <code>${I.path}</code>, so those will fail with
+         ModuleNotFoundError. The container has all of them:
+         <br><code>./container.sh exec "python -m aiworker_icrt.ui --host 0.0.0.0"</code>
+       </div>` : '';
+  $('#srcs').innerHTML = STATE.sources.map(s => `<option value="${s}">`).join('');
+
+  const dsOpts = STATE.datasets.map(d =>
+    `<option value="${d.path}">${d.name} — ${d.n_episodes} episodes</option>`).join('');
+  for (const id of ['#v_ds', '#t_ds', '#e_ds']) {
+    const el = $(id), keep = el.value;
+    el.innerHTML = dsOpts || '<option value="">no converted datasets</option>';
+    if (keep) el.value = keep;
+  }
+  $('#e_ck').innerHTML = STATE.checkpoints.map(c =>
+    `<option value="${c.path}" data-yaml="${c.yaml}">${c.path}</option>`).join('')
+    || '<option value="">no checkpoints yet</option>';
+  syncDataset();
+  renderJobs();
+}
+
+function ds(path) { return STATE.datasets.find(d => d.path === path); }
+
+/* Name the experimental condition the operator has just constructed.
+   Condition 3 is the one the whole claim rests on: if the policy follows the
+   scene rather than the prompt, that is recognition, not in-context learning —
+   and conditions 1+2 alone cannot tell the difference. */
+function showCondition() {
+  const el = $('#e_cond'); if (!el) return;
+  const d = ds($('#e_ds').value);
+  const m = d && d.ep_task;
+  const pt = m && m[$('#e_prompt').value], et = m && m[$('#e_eval').value];
+  if (!m) { el.innerHTML = ''; return; }
+  let body;
+  if (!pt || !et) body = ['', 'episodes are not task-grouped — re-convert to get verb_to_episode'];
+  else if ($('#e_prompt').value === $('#e_eval').value)
+    body = ['warn', 'prompt and eval are the SAME episode — this measures memorisation'];
+  else if (pt === et)
+    body = ['ok', '<b>Condition 1 · same-task</b> — the baseline'];
+  else
+    body = ['accent', '<b>Condition 3 · adversarial</b>: prompt from one task, ' +
+            'observations from another. Does the policy follow the PROMPT or the SCENE? ' +
+            'This is the experiment.'];
+  el.innerHTML = `<div class="cond ${body[0]}">${body[1]}</div>`;
+}
+document.addEventListener('change', ev => {
+  if (ev.target.matches('#e_prompt') || ev.target.matches('#e_eval')) showCondition();
+});
+
+function syncDataset() {
+  const v = ds($('#v_ds').value);
+  $('#v_ep').innerHTML = v ? v.episodes.map(e => `<option>${e}</option>`).join('') : '';
+  const e = ds($('#e_ds').value);
+  // Group by task: constructing condition 2 or 3 means deliberately picking
+  // episodes from DIFFERENT groups, which a flat list makes guesswork.
+  let eps = '';
+  if (e) {
+    const byTask = {};
+    for (const ep of e.episodes) {
+      const t = (e.ep_task && e.ep_task[ep]) || '(ungrouped)';
+      (byTask[t] = byTask[t] || []).push(ep);
+    }
+    const names = Object.keys(byTask);
+    eps = names.length > 1
+      ? names.map(t => {
+          const g = document.createElement('optgroup');
+          g.label = t.length > 58 ? t.slice(0, 55) + '…' : t;
+          g.innerHTML = byTask[t].map(x => `<option>${x}</option>`).join('');
+          return g.outerHTML;
+        }).join('')
+      : e.episodes.map(x => `<option>${x}</option>`).join('');
+  }
+  $('#e_prompt').innerHTML = eps; $('#e_eval').innerHTML = eps;
+  if (e && e.episodes.length > 1) $('#e_eval').selectedIndex = 1;
+  showCondition();
+  const ck = $('#e_ck').selectedOptions[0];
+  if (ck && ck.dataset.yaml && !$('#e_yaml').value) $('#e_yaml').value = ck.dataset.yaml;
+
+  const t = ds($('#t_ds').value);
+  if (t) {
+    const thin = t.thin_tasks.length
+      ? ` · <span style="color:var(--warn)">thin tasks: ${t.thin_tasks.join(', ')}</span>` : '';
+    // A dataset converted before the 23/21 change declares no dims. Say so here,
+    // not only at submit — the operator should see it while choosing.
+    const dims = t.legacy_dims
+      ? ` · <span style="color:var(--warn)">20-D (pre-23/21) — re-convert before training</span>`
+      : ` · proprio_extra ${t.dims.proprio_extra} · action_extra ${t.dims.action_extra}`;
+    $('#t_facts').innerHTML =
+      `${t.n_episodes} episodes · lengths ${t.len_min}–${t.len_max} frames · ` +
+      `${t.tasks.length} tasks${thin}${dims}`;
+    // Prefill BOTH length knobs from the data. The rule is not a constant:
+    // seq-length must exceed the longest episode, maximum-length likewise.
+    if (t.len_max) {
+      $('#t_max').value = Math.max(Number($('#t_max').value) || 0, t.len_max + 50);
+      $('#t_seq').value = Math.max(Number($('#t_seq').value) || 0, t.seq_length_min);
+    }
+    const sq = Number($('#t_seq').value);
+    $('#t_cost').innerHTML = sq >= 1024
+      ? `seq-length ${sq}: attention is quadratic and vision encoding doubles per
+         doubling — expect roughly 20 GB+ and ~5 s/it (512 measured 9.8 GB, 2.32 s/it).
+         Fits GB10 (128 GB) and RTX PRO 6000 (96 GB), but not a surprise you want mid-run.`
+      : '';
+  } else $('#t_facts').textContent = '';
+}
+document.addEventListener('input', ev => { if (ev.target.matches('#t_seq')) syncDataset(); });
+document.addEventListener('change', ev => {
+  if (ev.target.matches('#v_ep') || ev.target.matches('#v_ds')) {
+    const d = ds($('#v_ds').value);
+    const ep = $('#v_ep').value;
+    $('#v_note').textContent = (d && d.viz.includes(ep))
+      ? 'already rendered — loaded below' : 'not rendered yet — press Render';
+    loadReplay($('#v_ds').value, ep);
+  }
+});
+['#v_ds', '#t_ds', '#e_ds', '#e_ck'].forEach(id =>
+  document.addEventListener('change', ev => { if (ev.target.matches(id)) syncDataset(); }));
+
+/* ---------- launching ---------- */
+const bodies = {
+  convert: () => ({lerobot_root: $('#c_src').value, out_dir: $('#c_out').value,
+    target_fps: $('#c_fps').value, limit: $('#c_limit').value,
+    image_size: $('#c_size').value, prompt_dir: $('#c_prompt').value,
+    camera_map: $('#c_cam').value}),
+  visualize: () => ({dataset: $('#v_ds').value, episode: $('#v_ep').value,
+    fps: $('#v_fps').value, limit: $('#v_limit').value}),
+  train: c => ({dataset: $('#t_ds').value,
+    // `+""` is 0, so a cleared box used to send a valid-looking zero. n() keeps
+    // the form from being able to build a request the server must reject.
+    seq_length: n('#t_seq', 512), maximum_length: n('#t_max', 1200),
+    non_overlapping: n('#t_nov', 256), epochs: n('#t_ep', 1),
+    batch_size: n('#t_bs', 1), accum_iter: n('#t_ai', 2),
+    rebalance_tasks: $('#t_rebal').checked,
+    proprio_extra: +$('#t_pex').value, action_extra: +$('#t_aex').value,
+    output_dir: $('#t_out').value, log_name: $('#t_name').value, confirm: !!c}),
+  evaluate: () => ({dataset: $('#e_ds').value, checkpoint: $('#e_ck').value,
+    train_yaml: $('#e_yaml').value, prompt: $('#e_prompt').value,
+    eval: $('#e_eval').value, max_steps: $('#e_steps').value}),
+};
+
+document.addEventListener('click', async ev => {
+  const b = ev.target.closest('[data-run]'); if (!b) return;
+  const kind = b.dataset.run;
+  b.disabled = true;
+  try { await run(kind, false); } finally { b.disabled = false; }
+});
+
+async function run(kind, confirmed) {
+  const r = await fetch('/api/' + kind, {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(bodies[kind](confirmed))});
+  const j = await r.json();
+  if (r.status === 409) {   // the three silent-failure guards
+    $('#t_warn').innerHTML =
+      `<div class="warn"><strong>These will not error — they fail silently.</strong>
+       <ul>${j.warnings.map(w => `<li>${w}</li>`).join('')}</ul>
+       <button class="ghost" id="anyway" style="margin-top:8px">Train anyway</button></div>`;
+    $('#anyway').onclick = () => { $('#t_warn').innerHTML = ''; run('train', true); };
+    return;
+  }
+  if (!r.ok) { alert(j.error || 'failed'); return; }
+  $('#t_warn').innerHTML = '';
+  current = j.id; offset = 0; follow = true; $('#log').textContent = '';
+  await refresh(); poll();
+}
+
+/* ---------- jobs + log ---------- */
+function renderJobs() {
+  $('#jobs').innerHTML = STATE.jobs.slice(0, 10).map(j =>
+    `<button class="ghost" data-job="${j.id}">${j.id}
+      <span class="pill ${j.status}">${j.status}</span> ${j.elapsed}s</button>`).join('')
+    || '<span class="meta">no jobs yet</span>';
+}
+$('#jobs').addEventListener('click', e => {
+  const b = e.target.closest('[data-job]'); if (!b) return;
+  current = b.dataset.job; offset = 0; follow = true; $('#log').textContent = ''; poll();
+});
+$('#log').addEventListener('scroll', () => {
+  const el = $('#log');
+  follow = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
+});
+
+async function poll() {
+  if (!current) return;
+  const r = await fetch(`/api/job/${current}?offset=${offset}`);
+  if (!r.ok) return;
+  const j = await r.json();
+  if (j.lines.length) {
+    $('#log').textContent += j.lines.join('\n') + '\n';
+    offset = j.next_offset;
+    if (follow) $('#log').scrollTop = $('#log').scrollHeight;
+  }
+  $('#logmeta').innerHTML =
+    `${j.kind} · <span class="pill ${j.status}">${j.status}</span> · ${j.elapsed}s` +
+    (j.returncode !== null ? ` · exit ${j.returncode}` : '') +
+    (j.status === 'running' ? ` · <button class="ghost" id="stopj">stop</button>` : '');
+  const s = $('#stopj');
+  if (s) s.onclick = () => fetch(`/api/job/${current}/stop`, {method: 'POST'});
+  spark(j);
+  if (j.status === 'done') { onFinish(j); }
+  if (j.kind === 'train' || j.kind === 'evaluate') {
+    // refresh the GPU readout while GPU work is in flight, so "is it actually
+    // using the card" is answerable at a glance rather than by inference
+    if (!poll._t || Date.now() - poll._t > 2000) { poll._t = Date.now(); refresh(); }
+  }
+  if (j.status === 'running' || j.status === 'stopping') setTimeout(poll, 700);
+  else refresh();
+}
+
+/* ---------- replay: video + EEF charts on one shared playhead ----------
+   Arrangement from cyclo_intelligence's Replay page; its two ideas kept
+   (state/action overlaid on ONE axis in fixed colours, one playhead shared by
+   video and charts) and its drag machinery skipped. No React, no recharts.
+
+   Palette: #dc2626 / #2563eb validated with the dataviz skill's checker against
+   BOTH surfaces -- adjacent CVD dE 29.9 (protan) / 34.8 (tritan), normal-vision
+   38.2, contrast >= 3:1, lightness band and chroma floor pass in light AND dark.
+   Do not "improve" these by eye; re-run the validator if you change them. */
+const STATE_COLOR = '#dc2626', ACTION_COLOR = '#2563eb';
+/* Arm identity is chrome, NOT a series hue. Two reasons, and the second is
+   measured: (1) inside a chart the comparison that matters is state-vs-action —
+   making hue mean "arm" would demote that to dash-only, while arm is already
+   named by the column heading; (2) the proposed teal/amber pair FAILS the
+   validator's lightness band as chart marks (0.785/0.769 against a 0.48–0.67
+   band). They are correct as chrome, which the band does not govern, and they
+   match the video overlay so left/right reads across the whole page. */
+const ARM_COLOR = {left: '#2dd4bf', right: '#f59e0b'};
+const H_CHART = 66, DPR = Math.min(2, window.devicePixelRatio || 1);
+let RP = null;
+
+function closestIndex(times, t) {          // binary search, as in JointChart.js
+  let lo = 0, hi = times.length - 1;
+  if (t <= times[0]) return 0;
+  if (t >= times[hi]) return hi;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] <= t) lo = mid; else hi = mid;
+  }
+  return (t - times[lo] <= times[hi] - t) ? lo : hi;
+}
+
+const cssVar = n => getComputedStyle(document.body).getPropertyValue(n).trim();
+
+function sizeCanvas(c) {
+  const w = Math.max(120, c.canvas.clientWidth);
+  c.canvas.width = Math.round(w * DPR);
+  c.canvas.height = Math.round(H_CHART * DPR);
+  c.ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  c.w = w; c.h = H_CHART;
+}
+
+function drawSeries(c) {
+  const {ctx, series, lo, hi, w, h} = c, pad = 8;
+  const GUT = 34;                       // right gutter for the axis values
+  const plotW = w - GUT;
+  ctx.clearRect(0, 0, w, h);
+  const span = (hi - lo) || 1;
+  const yOf = v => h - pad - ((v - lo) / span) * (h - 2 * pad);
+
+  // Hairline grid: min, midpoint, max. Solid, one step off surface, recessive.
+  // The midpoint is what makes a trace readable as a magnitude rather than a
+  // shape -- without it every chart looks like the same wiggle.
+  const ticks = [c.rawLo, (c.rawLo + c.rawHi) / 2, c.rawHi];
+  ctx.strokeStyle = cssVar('--line-soft') || '#22262b';
+  ctx.lineWidth = 1;
+  for (const v of ticks) {
+    const y = Math.round(yOf(v)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(plotW, y); ctx.stroke();
+  }
+  // Zero line, drawn only when zero is actually inside the range.
+  if (c.rawLo < 0 && c.rawHi > 0) {
+    const y = Math.round(yOf(0)) + 0.5;
+    ctx.strokeStyle = cssVar('--line') || '#2a2e34';
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(plotW, y); ctx.stroke();
+  }
+  // Axis values in the gutter: min and max only. Text wears a TEXT token.
+  ctx.fillStyle = cssVar('--muted') || '#8b9299';
+  ctx.font = '9.5px ui-monospace,monospace';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(fmt(c.rawHi, c.unit), plotW + 5, yOf(c.rawHi));
+  ctx.fillText(fmt(c.rawLo, c.unit), plotW + 5, yOf(c.rawLo));
+
+  const step = plotW / (series[0].values.length - 1);
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  for (const {values, color} of series) {
+    if (c.stepped) {
+      // The gripper is a STATE, not a coordinate: it holds a value and jumps.
+      // A step with a 10% wash reads as "open until here, then closed", which a
+      // smooth line actively misrepresents.
+      const path = new Path2D();
+      path.moveTo(0, yOf(values[0]));
+      values.forEach((v, i) => { const x = i * step;
+        path.lineTo(x, yOf(values[i - 1] ?? v)); path.lineTo(x, yOf(v)); });
+      const fill = new Path2D(path);
+      fill.lineTo(plotW, yOf(c.lo)); fill.lineTo(0, yOf(c.lo)); fill.closePath();
+      ctx.globalAlpha = 0.10; ctx.fillStyle = color; ctx.fill(fill);
+      ctx.globalAlpha = 1; ctx.lineWidth = 2; ctx.strokeStyle = color;
+      ctx.stroke(path);
+    } else {
+      ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 2;
+      values.forEach((v, i) => { const x = i * step, y = yOf(v);
+                                 i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      ctx.stroke();
+    }
+  }
+  c.plotW = plotW;
+  c.bg = ctx.getImageData(0, 0, c.canvas.width, c.canvas.height);
+  c.yOf = yOf;
+}
+
+function drawOverlay(c, playIdx, hoverIdx, n) {
+  const {ctx, series, w, h} = c;
+  ctx.putImageData(c.bg, 0, 0);
+  const surface = cssVar('--panel') || '#fff';
+  const step = (c.plotW || w) / (n - 1);
+
+  const marks = [];
+  if (hoverIdx != null && hoverIdx !== playIdx) marks.push([hoverIdx, false]);
+  marks.push([playIdx, true]);
+
+  for (const [idx, strong] of marks) {
+    const x = idx * step;
+    ctx.beginPath();
+    ctx.strokeStyle = strong ? 'rgba(128,128,128,.85)' : 'rgba(128,128,128,.4)';
+    ctx.lineWidth = 1;
+    ctx.moveTo(Math.round(x) + 0.5, 0); ctx.lineTo(Math.round(x) + 0.5, h); ctx.stroke();
+    for (const {values, color} of series) {
+      const y = c.yOf(values[idx]);
+      // >=8px marker with a 2px surface ring, so dots stay legible where the
+      // two series cross each other
+      ctx.beginPath(); ctx.fillStyle = color; ctx.arc(x, y, 4, 0, 7); ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = surface; ctx.stroke();
+    }
+  }
+}
+
+function fmt(v, unit) { return unit === 'm' ? v.toFixed(3) : v.toFixed(2); }
+
+function mkChart(host, arm, key, unit, seriesDefs) {
+  const wrap = document.createElement('div'); wrap.className = 'ch';
+  const cap = document.createElement('b');
+  const canvas = document.createElement('canvas');
+  canvas.tabIndex = 0;                       // keyboard parity with hover
+  canvas.setAttribute('role', 'img');
+  canvas.setAttribute('aria-label',
+    `${arm} arm ${key} in ${unit}: recorded state and predicted action over time`);
+  wrap.append(cap, canvas); host.appendChild(wrap);
+
+  let lo = Infinity, hi = -Infinity;
+  for (const sd of seriesDefs) for (const v of sd.values) {
+    if (v < lo) lo = v; if (v > hi) hi = v;
+  }
+  const padv = (hi - lo) * 0.08 || 0.01;
+  const c = {canvas, ctx: canvas.getContext('2d'), series: seriesDefs,
+             lo: lo - padv, hi: hi + padv, cap, key, unit, arm,
+             rawLo: lo, rawHi: hi, hover: null, stepped: key === 'gripper'};
+
+  const idxFromEvent = ev => {
+    const r = canvas.getBoundingClientRect();
+    const plotFrac = (c.plotW || r.width) / (c.w || r.width);   // exclude the gutter
+    const frac = Math.min(1, Math.max(0, (ev.clientX - r.left) / (r.width * plotFrac)));
+    return Math.round(frac * (RP.data.time.length - 1));
+  };
+  canvas.addEventListener('pointermove', ev => { c.hover = idxFromEvent(ev); syncAll(ev); });
+  canvas.addEventListener('pointerleave', () => { c.hover = null; hideTip(); syncAll(); });
+  canvas.addEventListener('click', ev => {
+    const v = $('#r_video');
+    if (v.duration) v.currentTime = RP.data.time[idxFromEvent(ev)];
+  });
+  canvas.addEventListener('focus', () => { c.hover = RP.playIdx; syncAll(); });
+  canvas.addEventListener('keydown', ev => {
+    if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+    ev.preventDefault();
+    const v = $('#r_video'), n = RP.data.time.length;
+    const i = Math.min(n - 1, Math.max(0, RP.playIdx + (ev.key === 'ArrowRight' ? 1 : -1)));
+    if (v.duration) v.currentTime = RP.data.time[i];
+  });
+  return c;
+}
+
+/* one tooltip, listing every series at that X */
+function showTip(ev, idx) {
+  const tip = $('#r_tip'), d = RP.data;
+  tip.textContent = '';
+  const head = document.createElement('div');
+  head.className = 'tip-t';
+  head.textContent = `t = ${d.time[idx].toFixed(2)} s   ·   frame ${idx}`;
+  tip.appendChild(head);
+  for (const arm of ['left', 'right']) {
+    for (const [key, unit] of [['x','m'], ['y','m'], ['z','m'], ['gripper','']]) {
+      const row = document.createElement('div'); row.className = 'tip-r';
+      const k = document.createElement('span'); k.className = 'tip-k';
+      k.textContent = `${arm} ${key}`;
+      const sv = document.createElement('b');
+      sv.textContent = fmt(d.state[arm][key][idx], unit);
+      const av = document.createElement('b');
+      av.textContent = fmt(d.action[arm][key][idx], unit);
+      const s1 = document.createElement('i'); s1.className = 'key'; s1.style.background = STATE_COLOR;
+      const s2 = document.createElement('i'); s2.className = 'key'; s2.style.background = ACTION_COLOR;
+      row.append(k, s1, sv, s2, av);
+      tip.appendChild(row);
+    }
+  }
+  tip.hidden = false;
+  const pad = 14, tw = tip.offsetWidth, th = tip.offsetHeight;
+  let x = ev.clientX + pad, y = ev.clientY + pad;
+  if (x + tw > innerWidth - 8) x = ev.clientX - tw - pad;
+  if (y + th > innerHeight - 8) y = ev.clientY - th - pad;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+function hideTip() { const t = $('#r_tip'); if (t) t.hidden = true; }
+
+function syncAll(ev) {
+  if (!RP) return;
+  const n = RP.data.time.length;
+  let hover = null;
+  for (const c of RP.charts) if (c.hover != null) hover = c.hover;
+  for (const c of RP.charts) {
+    drawOverlay(c, RP.playIdx, hover, n);
+    const i = hover != null ? hover : RP.playIdx;
+    c.cap.textContent =
+      `${c.key}${c.unit ? ' (' + c.unit + ')' : ''}  ` +
+      `${fmt(c.series[0].values[i], c.unit)} / ${fmt(c.series[1].values[i], c.unit)}` +
+      `   [${fmt(c.rawLo, c.unit)} … ${fmt(c.rawHi, c.unit)}]`;
+  }
+  if (ev && hover != null) showTip(ev, hover);
+}
+
+function buildTable() {
+  const d = RP.data, t = $('#r_table');
+  t.textContent = '';
+  const head = document.createElement('tr');
+  for (const h of ['t (s)', 'L x', 'L y', 'L z', 'L grip',
+                   'R x', 'R y', 'R z', 'R grip']) {
+    const th = document.createElement('th'); th.textContent = h; head.appendChild(th);
+  }
+  t.appendChild(head);
+  const stride = Math.max(1, Math.round(d.time.length / 60));  // ~60 rows, readable
+  for (let i = 0; i < d.time.length; i += stride) {
+    const tr = document.createElement('tr');
+    const cells = [d.time[i].toFixed(2)];
+    for (const arm of ['left', 'right'])
+      for (const [k, u] of [['x','m'], ['y','m'], ['z','m'], ['gripper','']])
+        cells.push(fmt(d.state[arm][k][i], u));
+    for (const v of cells) {
+      const td = document.createElement('td'); td.textContent = v; tr.appendChild(td);
+    }
+    t.appendChild(tr);
+  }
+  $('#r_tablewrap').hidden = false;
+}
+
+async function loadReplay(dataset, episode) {
+  let d;
+  try {
+    const r = await fetch(`/api/file?path=${dataset}/viz/${episode}.json&t=${Date.now()}`);
+    if (!r.ok) throw 0;
+    d = await r.json();
+  } catch { $('#replay').hidden = true; return; }
+
+  $('#replay').hidden = false;
+  $('#r_title').textContent =
+    `${episode} · ${d.frames} frames @ ${d.fps} fps · ${d.time[d.time.length-1].toFixed(1)} s`;
+  const v = $('#r_video');
+  v.src = `/api/file?path=${dataset}/viz/${episode}.mp4&t=${Date.now()}`;
+  $('#r_legend').innerHTML =
+    `<span class="key" style="background:${ARM_COLOR.left}"></span>left arm` +
+    `<span class="key" style="background:${ARM_COLOR.right};margin-left:12px"></span>right arm` +
+    ` &nbsp;·&nbsp; ` +
+    `<span class="key" style="background:${STATE_COLOR}"></span>state` +
+    `<span class="key" style="background:${ACTION_COLOR};margin-left:12px"></span>action` +
+    ` &nbsp;·&nbsp; EEF in <b>${d.frame_root}</b>: z is height above the floor` +
+    ` &nbsp;·&nbsp; gripper <b>${d.gripper_sense}</b>`;
+
+  const host = $('#r_charts'); host.innerHTML = '';
+  RP = {data: d, charts: [], playIdx: 0};
+  for (const arm of ['left', 'right']) {
+    const col = document.createElement('div'); col.className = 'arm';
+    col.style.setProperty('--arm', ARM_COLOR[arm]);
+    const h3 = document.createElement('h3'); h3.textContent = `${arm.toUpperCase()} ARM`;
+    col.appendChild(h3); host.appendChild(col);
+    for (const [key, unit] of [['x', 'm'], ['y', 'm'], ['z', 'm'], ['gripper', '']]) {
+      RP.charts.push(mkChart(col, arm, key, unit, [
+        {values: d.state[arm][key], color: STATE_COLOR},
+        {values: d.action[arm][key], color: ACTION_COLOR},
+      ]));
+    }
+  }
+  const redraw = () => { for (const c of RP.charts) { sizeCanvas(c); drawSeries(c); } syncAll(); };
+  redraw();
+  RP.redraw = redraw;
+
+  const onTime = () => { RP.playIdx = closestIndex(d.time, v.currentTime); syncAll(); };
+  v.ontimeupdate = onTime; v.onseeked = onTime; v.onloadedmetadata = onTime;
+  onTime();
+  buildTable();
+}
+
+addEventListener('resize', () => { if (RP && RP.redraw) RP.redraw(); });
+matchMedia('(prefers-color-scheme: dark)')
+  .addEventListener('change', () => { if (RP && RP.redraw) RP.redraw(); });
+
+function spark(j) {
+  if (j.kind !== 'train' || !j.losses.length) { $('#spark').innerHTML = ''; return; }
+  const L = j.losses, hi = Math.max(...L), lo = Math.min(...L);
+  const flat = hi === 0 && lo === 0;
+  const W = 100, H = 46, pad = 5;
+  const yOf = v => H - pad - (hi > lo ? (v - lo) / (hi - lo) : .5) * (H - 2 * pad);
+  const xOf = i => (i / Math.max(1, L.length - 1)) * W;
+  const pts = L.map((v, i) => `${xOf(i).toFixed(2)},${yOf(v).toFixed(2)}`).join(' ');
+  // Single series -> no legend box; the caption names it. 2px line, one end
+  // marker with a surface ring, hairline baseline. Same specs as the replay
+  // charts so the two read as one system.
+  $('#spark').innerHTML =
+    `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"
+          role="img" aria-label="training loss over ${L.length} steps">
+       <line x1="0" y1="${yOf(lo).toFixed(2)}" x2="${W}" y2="${yOf(lo).toFixed(2)}"
+             stroke="var(--line)" stroke-width="1" vector-effect="non-scaling-stroke"/>
+       <polyline points="${pts}" fill="none" stroke="${STATE_COLOR}" stroke-width="2"
+             stroke-linejoin="round" stroke-linecap="round"
+             vector-effect="non-scaling-stroke"/>
+       <circle cx="${xOf(L.length - 1).toFixed(2)}" cy="${yOf(L[L.length - 1]).toFixed(2)}"
+             r="4" fill="${STATE_COLOR}" stroke="var(--panel)" stroke-width="2"
+             vector-effect="non-scaling-stroke"/>
+     </svg>
+     <div class="meta">loss <b style="color:var(--ink)">${L[L.length - 1].toFixed(4)}</b>
+       · min ${lo.toFixed(4)} · ${L.length} steps
+       ${flat ? '<span class="flat">— FLAT 0.0000: seq-length is almost certainly below the longest episode; this run is learning nothing</span>' : ''}</div>`;
+}
+
+/* show artefacts when a job finishes */
+function onFinish(j) {
+  if (j.kind === 'visualize') loadReplay($('#v_ds').value, $('#v_ep').value);
+  if (j.kind === 'evaluate') {
+    const line = j.lines.slice().reverse().find(l => l.includes('.png'));
+    const m = line && line.match(/(\S+\.png)/);
+    if (m) $('#e_out').innerHTML =
+      `<img src="/api/file?path=${m[1].replace(STATE.repo + '/', '')}&t=${Date.now()}" alt="eval traces">`;
+  }
+}
+
+/* Deep link: /?replay=<dataset>&ep=<episode> opens straight into a replay.
+   Useful for sharing "look at this episode", and it makes the view renderable
+   without clicking, which is how it gets screenshot-checked. */
+(async () => {
+  await refresh();
+  const q = new URLSearchParams(location.search);
+  const dsq = q.get('replay'), epq = q.get('ep');
+  if (dsq && epq) {
+    $('#tabs').querySelectorAll('button').forEach(x =>
+      x.setAttribute('aria-selected', x.dataset.t === 'visualize'));
+    document.querySelectorAll('.pane').forEach(pn => pn.hidden = pn.id !== 'p-visualize');
+    $('#v_ds').value = dsq; syncDataset(); $('#v_ep').value = epq;
+    await loadReplay(dsq, epq);
+  }
+})();
+setInterval(() => { if (!current) refresh(); }, 4000);
+</script>
+</body>
+</html>

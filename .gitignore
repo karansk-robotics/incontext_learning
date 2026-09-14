@@ -1,0 +1,38 @@
+# --- datasets and checkpoints -------------------------------------------------
+# data/ is ~46 GB on this host (icrt_multitask alone is 33 GB). Never committed;
+# GitHub rejects files over 100 MB and this would exceed every repo limit.
+# Regenerate with aiworker_icrt/convert_lerobot_icrt.py from the raw LeRobot sets.
+data/
+output/
+*.ckpt
+*.pth
+*.safetensors
+
+# --- credentials --------------------------------------------------------------
+# token.txt is a live Hugging Face token on this machine. Never commit it.
+token.txt
+*.pem
+.env
+.env.*
+.netrc
+
+# --- vendored upstream sources ------------------------------------------------
+# third_party/ holds three UPSTREAM repositories, each with its own .git. They are
+# not ours to redistribute and committing them would create broken gitlinks.
+# Clone them alongside this repo:
+#   third_party/icrt           https://github.com/Max-Fu/icrt.git
+#   third_party/ai_worker      https://github.com/ROBOTIS-GIT/ai_worker.git
+#   third_party/cyclo_control  https://github.com/ROBOTIS-GIT/cyclo_control.git
+third_party/
+
+# --- python -------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# --- misc ---------------------------------------------------------------------
+*.log
+.DS_Store

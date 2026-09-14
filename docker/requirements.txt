@@ -1,0 +1,93 @@
+# ICRT + AI Worker runtime deps, on top of nvcr.io/nvidia/pytorch:25.11-py3.
+#
+# Everything here is installed under PIP_CONSTRAINT=/etc/pip-constraints.txt,
+# which pins torch / torchvision / numpy / scipy / opencv / pillow to the exact
+# versions the NGC base ships. If any line below tries to move one of those,
+# the build FAILS instead of silently swapping NVIDIA's CUDA build for a PyPI
+# wheel. That is the single most important property of this file.
+#
+# NOT listed, deliberately:
+#   torch, torchvision  -> NGC base; a PyPI wheel would drop sm_110/sm_120
+#   numpy               -> NGC base; ABI-coupled to their torch
+#   (opencv is now LISTED below, not excluded — see the note there. The old
+#    rationale on this line was wrong and is kept nowhere.)
+#   flash-attn          -> third_party/icrt/icrt/models/backbones/utils.py:25
+#                          imports it only inside handle_flash_attn(), which has
+#                          ZERO call sites in the repo. Its pinned v2.2.3 also
+#                          predates Blackwell and will not build for sm_110/121.
+#   kinpy               -> dropped per aiworker-iclr-01: nothing in this pipeline
+#                          imports it. aiworker_icrt/kinematics.py does its own
+#                          URDF parse + Jacobian. Only ICRT's scripts/eval_fk.py
+#                          wants it, and that path needs robomimic and is unused.
+#   pyzed               -> needs the ZED SDK on the host; camera capture only.
+#   lerobot, datasets, pyarrow -> see requirements-data.txt (training host only)
+#
+# scipy / Pillow / PyYAML / tqdm / matplotlib / tensorboard are listed even
+# though the NGC base almost certainly ships them: with the constraint file a
+# satisfied requirement is a no-op, so listing them is free insurance against
+# an ImportError at node startup. scipy.spatial.transform.Rotation is a hard
+# import in third_party/icrt/icrt/data/utils.py AND aiworker_icrt/kinematics.py;
+# yaml is a hard import in icrt_wrapper.py AND aiworker_icrt/policy.py.
+
+# --- ICRT model stack (exact pins: behaviour-sensitive) ---
+timm==1.0.11
+diffusers==0.31.0
+loralib==0.1.2
+
+# opencv: pip wheel, PINNED, and cv-bridge is deliberately NOT installed.
+#
+# Two measured facts drove this:
+#  1. Ubuntu's python3-opencv (4.6.0, via cv-bridge) is built against numpy 1.x
+#     and cannot load against the NGC base's numpy 2.1.0:
+#        ImportError: numpy.core.multiarray failed to import
+#  2. Layering a pip cv2 beside cv-bridge does NOT fix it. Measured in the built
+#     image via a cv_bridge ROUND-TRIP (an `import cv2` / `import cv_bridge`
+#     check passes and hides both of these). There are TWO independent causes:
+#
+#        pip cv2 5.0.0 + cv_bridge -> KeyError: 16 in cv_bridge/core.py:276
+#           OpenCV 5 changed the CV_MAKETYPE channel shift. cv_bridge builds its
+#           table from cv2 constants, so it never contains the code its .so
+#           returns:  CV_8UC3  cv2 5.0.0 = 64  vs  getCvType(bgr8) = 16.
+#           Single-channel survives (C1 shift is zero); every colour encoding
+#           breaks.
+#
+#        pip cv2 4.14.0 + cv_bridge -> SEGFAULT (core dumped)
+#           NOT the same cause. At 4.14 the type codes AGREE (both 16) — the
+#           OpenCV mismatch is resolved and it still dies, on NumPy ABI:
+#           cv_bridge_boost.so is compiled against NumPy 1.x, base ships 2.1.0.
+#           "A module that was compiled using NumPy 1.x cannot be run in
+#            NumPy 2.1.0 as it may crash."
+#
+#     CONSEQUENCE IF ANYONE RE-ADDS cv-bridge: rebuilding it against a single
+#     matching OpenCV is NOT sufficient. It must ALSO be rebuilt against NumPy 2,
+#     and NumPy 2 is non-negotiable here because NGC's torch is ABI-coupled to it.
+#     (Narrower true statement: cv_bridge's CONVERSION path is unusable.
+#     imgmsg_to_cv2(..., desired_encoding="passthrough") stays lossless because
+#     it never enters the C++ path.)
+#
+# Nothing in this project uses cv_bridge. ros_node.py already decodes
+# CompressedImage itself (np.frombuffer + cv2.imdecode) and the converter uses
+# cv2.VideoCapture, so cv-bridge / image-transport / compressed-image-transport
+# are all dropped from the apt list. That also removes the whole
+# opencv -> hdf5 -> openmpi -> libucx0 chain.
+#
+# PINNED to 4.x, not floating: OpenCV 5 is the first major in a decade and moves
+# APIs, and an unpinned entry silently handed us 5.0.0 on the first build while
+# every other behaviour-sensitive pin in this file is hard. Verified at this pin:
+# imdecode, resize and VideoCapture all work alongside torch and rclpy.
+opencv-python-headless==4.14.0.94
+
+# --- ICRT / AI Worker runtime ---
+h5py>=3.11
+tyro>=0.8
+scipy>=1.13
+PyYAML>=6.0
+Pillow>=10.3
+tqdm>=4.66
+matplotlib>=3.8
+mediapy>=1.2
+imgviz>=1.7
+
+# --- logging ---
+tensorboard>=2.17
+wandb>=0.17

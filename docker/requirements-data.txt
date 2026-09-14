@@ -1,0 +1,15 @@
+# LeRobot -> ICRT dataset conversion stack. Training host only.
+#
+# Opt in at build time:
+#   docker compose build --build-arg INSTALL_DATA_DEPS=1
+#   (or: ./container.sh build --build-arg INSTALL_DATA_DEPS=1)
+#
+# Kept out of the default image on purpose. lerobot pulls a large graph and
+# declares its own torch requirement; NVIDIA's torch is a pre-release
+# ("2.10.0a0+b558c98"), which pip can decide fails a plain `torch>=X` spec and
+# then "helpfully" reinstalls. PIP_CONSTRAINT turns that into a hard error, but
+# the robot image has no reason to carry the risk or the ~2GB at all.
+
+lerobot>=0.1.0
+datasets>=3.0
+pyarrow>=17.0

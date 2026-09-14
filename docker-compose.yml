@@ -1,0 +1,95 @@
+# ICRT + ROS 2 Jazzy (rmw_zenoh) — driven by ./container.sh
+#
+# ZENOH TOPOLOGY: exactly ONE rmw_zenohd for the whole robot network, not one
+# per host. Two routers on the same network both serve and you get duplicate /
+# looped traffic. The router runs behind the "router" compose profile, so a
+# plain `up` does NOT start one:
+#
+#   on the router host:   ./container.sh start --router
+#   on every other host:  ZENOH_ROUTER_ENDPOINT=tcp/<router-ip>:7447 ./container.sh start
+#
+# The shipped rmw_zenoh router config already listens on tcp/[::]:7447 (all
+# interfaces), so a single router is reachable across the network unmodified.
+# Client sessions default to connect.endpoints ["tcp/localhost:7447"], which is
+# what ZENOH_CONFIG_OVERRIDE below repoints. Verified against the configs in
+# ros-jazzy-rmw-zenoh-cpp 0.2.10:
+#   share/rmw_zenoh_cpp/config/DEFAULT_RMW_ZENOH_{SESSION,ROUTER}_CONFIG.json5
+
+x-common: &common
+  image: aiworker-icrt:${ICRT_TAG:-latest}
+  build:
+    context: .
+    dockerfile: ${ICRT_DOCKERFILE:-docker/DockerFile.arm64}
+    args:
+      BASE_IMAGE: ${ICRT_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.11-py3}
+      ROS_DISTRO: ${ROS_DISTRO:-jazzy}
+      INSTALL_DATA_DEPS: ${INSTALL_DATA_DEPS:-0}
+      INSTALL_CONTROL_DEPS: ${INSTALL_CONTROL_DEPS:-0}
+  # Host networking is what lets the Spark, the Thor and the robot's own nodes
+  # see one Zenoh router. Bridge mode would need every peer to know a NATed
+  # address.
+  network_mode: host
+  ipc: host
+  volumes:
+    - ./:/workspace
+    # Mounted over the image copy so `pip install -e /opt/icrt` tracks host edits.
+    - ./third_party/icrt:/opt/icrt
+    # Datasets and checkpoints. PLAN.md phases 2-5 all address this as /data
+    # inside the container. The converted set is ~180 GB (700 episodes x ~500
+    # steps x ~518 KB/timestep across 3 cameras), and ICRT's TRAIN.md names disk
+    # read as the training bottleneck — so point ICRT_DATA_DIR at NVMe, never at
+    # a network mount:
+    #     ICRT_DATA_DIR=/mnt/nvme/icrt ./container.sh start
+    - ${ICRT_DATA_DIR:-./data}:/data
+    - icrt-hf-cache:/root/.cache/huggingface
+    - icrt-torch-cache:/root/.cache/torch
+
+services:
+  # Single network-wide Zenoh router. Started only with `--router`.
+  zenohd:
+    <<: *common
+    profiles: ["router"]
+    container_name: icrt-zenohd
+    command: ["ros2", "run", "rmw_zenoh_cpp", "rmw_zenohd"]
+    environment:
+      RMW_IMPLEMENTATION: rmw_zenoh_cpp
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      # The router gets SHM but NOT connect/endpoints or mode=client — it must
+      # never be pointed at itself as a client.
+      ZENOH_CONFIG_OVERRIDE: 'transport/shared_memory/enabled=${ZENOH_SHM_ENABLED:-true}'
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "ss -ltn | grep -q ':7447'"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
+  icrt:
+    <<: *common
+    container_name: icrt
+    command: ["sleep", "infinity"]
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    environment:
+      RMW_IMPLEMENTATION: rmw_zenoh_cpp
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      ROS_LOCALHOST_ONLY: "0"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      # Composed by container.sh from ZENOH_ROUTER_IP/PORT + ZENOH_SHM_ENABLED:
+      # ';'-separated path=json5 pairs, applied via zenoh's zc_config_insert_json5.
+      # Adds mode="client" automatically when the router is remote.
+      ZENOH_CONFIG_OVERRIDE: ${ZENOH_CONFIG_OVERRIDE:-transport/shared_memory/enabled=true;connect/endpoints=["tcp/127.0.0.1:7447"]}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  icrt-hf-cache:
+  icrt-torch-cache:
