@@ -253,8 +253,15 @@ parameters, with no validation scored during training.** `log.txt` has no
   2.45× overspeed the gate reports — it would clamp and lag instead. Right symptom,
   wrong mechanism. Its `getCollisionPairDistances()` would also replace the crude
   EEF-distance proximity check.
-- **Condition 3 has never been run** — prompt from task A, observations from task
-  B. This is the core in-context claim and remains the central risk (`PLAN.md §4`):
+- **Condition 3 HAS NOW BEEN RUN — and it fails.** Prompting with a different
+  task costs the policy 1.0 mm on a 55.6 mm error (1.8%, noise), and prompting
+  with the episode about to be replayed does not help either. The prompt does
+  reach the model (predictions differ by up to 38.7 mm), so this is a real
+  negative, not a plumbing bug — the policy reads the demonstration and extracts
+  nothing. Caveat: this checkpoint is already 8x worse than the null baseline, so
+  the negative cannot yet be attributed to the method. Full result and method:
+  `condition3_result.md`. ORIGINAL NOTE: prompt from task A, observations from
+  task B. This is the core in-context claim and remains the central risk (`PLAN.md §4`):
   each task was recorded in its own scene at its own head angle, so the task may be
   identifiable from a single frame and the prompt redundant.
 - **No task-completion measure.** Position MAE says "close to what the human did",
@@ -314,7 +321,9 @@ parameters, with no validation scored during training.** `log.txt` has no
 5. **Score validation during training** — add `val_loss` to `log.txt` so
    overfitting shows up live instead of in a post-hoc sweep.
 6. **Compile `cyclo_py`** so the gate tests the deployment solver.
-7. **Run condition 3.**
+7. **Re-run condition 3** on the first checkpoint that beats the 0.0065 m
+   baseline — it has now been run once (`condition3_result.md`) and fails, but
+   on a policy too weak for the result to be attributable.
 
 ### What will not help
 

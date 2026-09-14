@@ -49,6 +49,7 @@ def evaluate(
     out_dir: Path,
     hdf5_name: str = 'ffw_sg2.hdf5',
     max_steps: Optional[int] = None,
+    prompt_max_steps: Optional[int] = None,
     device: str = 'cuda',
 ) -> dict:
     from aiworker_icrt.policy import DualArmICRT
@@ -66,7 +67,24 @@ def evaluate(
                          device=device)
 
     # Fill the KV cache with the demonstration.
+    #
+    # prompt_max_steps exists as an EXPERIMENTAL CONTROL, not a convenience.
+    # Condition 3 asks whether prompting with the same task beats prompting with
+    # a different one -- but our tasks have very different episode lengths (ylw2
+    # ~958 frames, box/ecu ~330), so an uncontrolled cross-task comparison varies
+    # prompt LENGTH at the same time as prompt TASK and cannot attribute either.
+    #
+    # We keep the LAST N frames rather than the first: the window stays
+    # contiguous and in-distribution, and it ends at the episode's end, which is
+    # exactly where create_prompt_mask puts a prompt boundary during training.
     T_p = len(prompt['joints'])
+    if prompt_max_steps and T_p > prompt_max_steps:
+        cut = T_p - prompt_max_steps
+        prompt = {'images': {k: v[cut:] for k, v in prompt['images'].items()},
+                  'joints': prompt['joints'][cut:],
+                  'cart_state': prompt['cart_state'][cut:],
+                  'cart_action': prompt['cart_action'][cut:]}
+        T_p = prompt_max_steps
     policy.prompt(
         images=[{k: prompt['images'][k][t] for k in C.CAMERA_KEYS} for t in range(T_p)],
         joint_states=prompt['joints'],
@@ -87,7 +105,8 @@ def evaluate(
     pred, gt = np.asarray(pred), np.asarray(gt)
 
     # Per-arm position error, and gripper agreement as a binary decision.
-    res = {'prompt_episode': prompt_ep, 'eval_episode': eval_ep, 'steps': int(T)}
+    res = {'prompt_episode': prompt_ep, 'eval_episode': eval_ep, 'steps': int(T),
+           'prompt_steps': int(T_p)}
     for side, sl in (('left', C.SLICE_CART_L), ('right', C.SLICE_CART_R)):
         pe = np.linalg.norm(pred[:, sl][:, C.SLICE_BLOCK_POS]
                             - gt[:, sl][:, C.SLICE_BLOCK_POS], axis=-1)
@@ -152,11 +171,16 @@ def main() -> None:
     ap.add_argument('--eval', dest='eval_ep', required=True, help='episode to replay')
     ap.add_argument('--out', type=Path, default=None)
     ap.add_argument('--max-steps', type=int, default=None)
+    ap.add_argument('--prompt-max-steps', type=int, default=None,
+                    help='keep only the last N frames of the prompt episode, so '
+                         'cross-task comparisons vary task and not prompt length')
     ap.add_argument('--device', default='cuda')
     a = ap.parse_args()
 
     res = evaluate(a.dataset, a.checkpoint, a.train_yaml, a.prompt, a.eval_ep,
-                   a.out or (a.dataset / 'eval'), a.hdf5_name, a.max_steps, a.device)
+                   a.out or (a.dataset / 'eval'), hdf5_name=a.hdf5_name,
+                   max_steps=a.max_steps, prompt_max_steps=a.prompt_max_steps,
+                   device=a.device)
     print(json.dumps(res, indent=2))
 
 
