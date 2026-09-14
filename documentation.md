@@ -18,8 +18,8 @@ Companion documents: `PLAN.md` (forward-looking), `EXECUTION.md` (what was built
 
 | | value |
 |---|---|
-| best checkpoint | `runs/mt21_gpu/checkpoint-15.pth` |
-| working-arm position error (40 steps) | **0.0546 m** |
+| best checkpoint | **`runs/mt21_warm/checkpoint-12.pth`** (was `mt21_gpu/checkpoint-15`) |
+| working-arm position error (40 steps) | **0.0308 m** (was 0.0546 m -- see `warm_start_result.md`) |
 | same, at 120 steps | **0.1244 m** |
 | "repeat the previous action" baseline | **0.0065 m** |
 | "command the currently observed pose" baseline | 0.0417 m |
@@ -302,7 +302,13 @@ parameters, with no validation scored during training.** `log.txt` has no
 
 ## 9. Next steps, in order of expected impact
 
-1. **Switch the action head** — the strongest untested hypothesis, one flag:
+0. **DONE — warm start from the DROID-pretrained trunk + CrossMAE encoder.**
+   Held-out error 0.0752 -> 0.0308 against an identical from-scratch control
+   (59% better at epoch 20), and it stops the overfitting the control shows from
+   epoch 4 onward. `warm_start_result.md`.
+
+1. **Switch the action head** — one flag, now demoted (their working model uses
+   `mlp` too):
    ```
    --model-cfg.policy-cfg.decoder-pred-head diffusion \
    --model-cfg.policy-cfg.num-train-diffusion-steps 100 \
