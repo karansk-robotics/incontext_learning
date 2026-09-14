@@ -190,10 +190,35 @@ ylw1      1      506     0.9%   right           0.000 m    3.041 m
 ```
 
 `ylw2` is 25% of the episodes but **49% of the frames**, because those recordings
-are long. Exactly **50.0% of training frames have the left arm frozen at 0.000 m**,
-and `rebalance_tasks` is **off**. One flag: `--dataset-cfg.rebalance-tasks`
-(ICRT supports it at `dataset.py:181`) samples each task equally rather than by
-frame count.
+are long — ~958 frames per episode against ~330 for `box` and `ecu`.
+
+**`rebalance_tasks` does NOT fix this, and it is already on.** All six runs
+(`mt21`, `mt21_gpu`, `mt21_scaled`, `mt21_tuned`, `mt21_v2`, `mt21_w6`) have
+`rebalance_tasks: true` in their `run.yaml` — the upstream default, never
+disabled. An earlier version of this file said it was off and recommended
+enabling it. That was wrong.
+
+**It makes the imbalance worse.** `rebalance_length` is the *median number of
+episodes per task* (`dataset.py:186`), so it equalises episode **count**, not
+frames — and our episodes are not the same length. Measured on the 114 training
+episodes of `mt21_gpu`:
+
+```
+task   train eps   mean len   raw share   after rebalance (37 eps each)
+ecu           37      342.6       22.6%        12,678 frames   21.1%
+box           48      326.4       27.9%        12,078 frames   20.1%
+ylw2          29      958.3       49.5%        35,456 frames   58.9%   <- replace=True
+```
+
+`ylw2` has 29 episodes against a rebalance length of 37, so it is sampled **with
+replacement** — the one task we want less of is the only one being oversampled.
+The left-arm-frozen share goes **49.5% → 58.9%**.
+
+ICRT has no frame-level balancing flag. The options are to cut the long `ylw2`
+recordings into shorter episodes, drop some of them, or record the other tasks
+longer. `task_grouping` (§C6) can also down-weight `ylw2` by a hand-set ratio,
+which is the cheapest lever — but it scales the *episode count* too, so the
+ratio has to absorb the ~3× length difference.
 
 ### C2 · No training setting creates behaviour that was never demonstrated
 
@@ -222,6 +247,21 @@ for training (a constant input is a bias; a constant delta target costs ~0 loss)
 and it is the *safe* configuration at inference. Write it as: "21-D (20 actuated
 in this campaign; the torso lift is in the space but held fixed throughout these
 recordings)."
+
+### C6 · `task_grouping` — the composition lever we have never used
+
+The authors group their 34 tasks into 6 action primitives and up-weight each by
+hand (`config/data_config/icrt_mt/task_grouping.json`):
+
+```json
+"ratios": { "drawer": 0.8, "push": 0.8, "poke": 1.5,
+            "pick_up": 0.8, "pick_place": 2.5, "stacking": 2.5 }
+```
+
+The ratio multiplies that group's rebalance length (`dataset.py:391`), so it is a
+direct dial on how often each task is sampled per epoch. Our
+`dataset_config.json` has no `task_grouping` key at all. It is the only
+per-task weighting ICRT exposes.
 
 ---
 
@@ -263,8 +303,8 @@ Try `gmm` too — cheaper at inference and often sufficient. ~2 h per run.
 ### D3 · Change one thing per run
 
 Two changes at once means you cannot attribute the result. Each run is ~2.2 h;
-three clean data points beat one ambiguous one. This is why `rebalance_tasks` was
-deliberately *not* added to the normalisation run mid-flight.
+three clean data points beat one ambiguous one. This is why no second flag was
+added to the normalisation run mid-flight.
 
 ---
 
@@ -363,6 +403,7 @@ part". There is still **no task-completion measure** — that needs a rollout.
 [ ] action_stats written to a NEW filename, near-constant channels on a tolerance
 [ ] WANDB_MODE=disabled set in the launch script
 [ ] val_loss column added to log.txt
+[ ] per-task FRAME share checked, not episode count -- rebalance_tasks equalises counts
 [ ] exactly ONE variable changed vs the previous run, and it is named in the run dir
 [ ] test_inference_path.py green — training green proves nothing about inference
 [ ] baseline numbers (0.0065 / 0.0417) in front of you before reading any result

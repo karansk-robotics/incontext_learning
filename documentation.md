@@ -176,8 +176,11 @@ action tensor is 22 wide: 21 real + eos, values exactly {0.0, 1.0}
 
 1. **50.0% of training frames have the left arm frozen at exactly 0.000 m.**
    `ylw2` is 25% of episodes but 49% of frames because those recordings are long.
-   `rebalance_tasks` is **off**, so half of every batch teaches "the left arm does
-   not move." One flag: `--dataset-cfg.rebalance-tasks`.
+   **`rebalance_tasks` was on in all six runs and makes this worse, not better**
+   — it equalises episode *count* (median = 37), and `ylw2` averages 958 frames
+   against ~330, so its frame share goes 49.5% → 58.9% and it is the only task
+   sampled with replacement. There is no frame-level balancing flag in ICRT; see
+   `training_tips.md` §C1.
 
 2. **There is no genuinely bimanual data.** Where both arms move (`box`, `ecu`),
    the left travels 10–13× further; the right's ~30 cm reads as steadying, not
@@ -303,8 +306,9 @@ parameters, with no validation scored during training.** `log.txt` has no
    19-D, 10 fps, `ffw_bg2_follower.urdf`). Decide fps **before** converting: BG2 is
    natively 10 fps and cannot be upsampled, so converting SG2 at 15 fps and BG2 at
    10 fps would give one model two delta scales for identical motion.
-3. **`--dataset-cfg.rebalance-tasks`** — half the frames currently teach "left arm
-   frozen".
+3. **Fix the frame-level task imbalance** — 58.9% of frames teach "left arm
+   frozen". `rebalance_tasks` is already on and causes it; cut the long `ylw2`
+   episodes or down-weight them via `task_grouping`.
 4. **Shrink the model** — 12 layers / 768 dim / 92.6 M trainable is large for 120
    episodes.
 5. **Score validation during training** — add `val_loss` to `log.txt` so
