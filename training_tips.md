@@ -298,13 +298,104 @@ A diffusion head samples from the action distribution instead of collapsing it,
 which is why diffusion policies replaced MSE regression for this class of problem.
 Try `gmm` too — cheaper at inference and often sufficient. ~2 h per run.
 
-**This is the strongest untested hypothesis and the cheapest to test.**
+It is cheap to test — one flag, ~2 h.
+
+**But it is no longer the strongest hypothesis.** Their released checkpoint's
+`run.yaml` says `decoder_pred_head: mlp`. The authors' working model uses the
+same plain MSE head we do, on data whose gripper carries **97.08%** of the
+action variance — worse than our 61.8%. MSE regression is demonstrably not what
+stops ICRT working. See §K.
 
 ### D3 · Change one thing per run
 
 Two changes at once means you cannot attribute the result. Each run is ~2.2 h;
 three clean data points beat one ambiguous one. This is why no second flag was
 added to the normalisation run mid-flight.
+
+---
+
+## K · What the authors actually did — from their released checkpoint
+
+Downloaded `mlfu7/ICRT`. The `.pth` is stripped to `model` only, but each
+checkpoint ships a `run.yaml` that is a serialisation of the real
+`ExperimentConfig` at training time. It settles several open questions.
+
+### K1 · They did not normalise actions
+
+`scale_action` is **absent from their `shared_cfg`** — while every other
+upstream `SharedConfig` field of that era is present, so the field did not yet
+exist when this was trained (June 2024; the public repo is August). They ship
+`config/data_config/icrt_mt/action_statistics.json`, but **no shipped config and
+no TRAIN.md command references it.**
+
+Decomposing those shipped statistics the same way we decomposed ours:
+
+```
+                 ICRT-MT      ours
+translation        0.65%     5.22%
+rotation           2.27%     33.0%
+gripper           97.08%     61.80%
+```
+
+**Their gripper owns 97% of the gradient and the model works anyway.** Our data
+is the *less* imbalanced of the two. This is independent confirmation that our
+normalisation result (§B2, +2%) was a correct experiment with a real, small
+answer — not a botched one.
+
+### K2 · They warm-start; we do not
+
+```
+                    theirs                          ours
+pretrained_path     .../pretrain/checkpoint-3.pth   null
+vision_encoder      cross-mae-rtx.pth (their own)   vit_base_patch16_224.mae (timm)
+num_repeat_traj     2                               1
+non_overlapping     32                              128
+seq_length          512                             1024
+num_cameras         2                               3
+epochs              125                             60 (stopped 46)
+decoder_pred_head   mlp                             mlp      <- identical
+proprio_noise       0.005                           0.005    <- identical
+lr / warmup         5e-4 / 1.25                     5e-4 / 1.0
+```
+
+Everything about the *objective* matches. What differs is that they start from a
+DROID-pretrained transformer and a vision encoder trained on robot data, and we
+start from random weights and an ImageNet encoder.
+
+### K3 · 95.7% of our parameters transfer from their checkpoint
+
+Measured by loading both state dicts and comparing shapes:
+
+```
+transferable   125 tensors   88.6M of our 92.6M params   95.7%
+blocked         24 tensors   the I/O adapters only
+```
+
+The 24 blocked tensors are exactly the boundary of our retarget:
+
+```
+icrt_proprio_encoder.fc1/fc2      (10,10)/(768,10)   ->  (21,21)/(768,21)
+icrt_action_encoder.fc1/fc2       (10,10)/(768,10)   ->  (21,21)/(768,21)
+icrt_action_decoder.mlp.fc2       (160,128)          ->  (336,128)   16x10 -> 16x21
+icrt_attn_pooling.{0,1}.*         width 384          ->  256         2 cameras -> 3
+icrt_attn_pooling.2.*             absent             ->  our third camera
+```
+
+`misc.load_model` uses `strict=False`, which tolerates missing and unexpected
+keys but **not** shape mismatches — those raise regardless. So this needs a
+filtered checkpoint: drop those 24 keys, keep the 125, load, train.
+
+### K4 · The revised priority
+
+1. **Warm-start from their DROID checkpoint** (88.6M params) and **use their
+   CrossMAE encoder**. This is the difference between their setup and ours that
+   the evidence actually supports, and it is one filtered `.pth` plus one flag.
+2. More data / more tasks — 1,550 episodes and 34 tasks against our 120 and 3.
+3. `num_repeat_traj 2`, so a window holds a demonstration and an attempt.
+4. The action head (§D) — still worth trying, now demoted: their working model
+   uses `mlp`.
+
+Both files are on `zeux` at `checkpoints_icrt/`.
 
 ---
 
