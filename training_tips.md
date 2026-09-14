@@ -214,11 +214,11 @@ ylw2          29      958.3       49.5%        35,456 frames   58.9%   <- replac
 replacement** — the one task we want less of is the only one being oversampled.
 The left-arm-frozen share goes **49.5% → 58.9%**.
 
-ICRT has no frame-level balancing flag. The options are to cut the long `ylw2`
-recordings into shorter episodes, drop some of them, or record the other tasks
-longer. `task_grouping` (§C6) can also down-weight `ylw2` by a hand-set ratio,
-which is the cheapest lever — but it scales the *episode count* too, so the
-ratio has to absorb the ~3× length difference.
+ICRT has no frame-level balancing flag. **The fix is `task_grouping` (§C6) with
+a ratio of 0.28 on `ylw2`, which brings it to 27.9% by editing one JSON file.**
+Cutting the long episodes only reaches 41.7% and is worth doing for a different
+reason. Measured options, the split script, and the order to do things in:
+`task_balance_fix.md`.
 
 ### C2 · No training setting creates behaviour that was never demonstrated
 
