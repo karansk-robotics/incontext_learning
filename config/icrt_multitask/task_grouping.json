@@ -1,0 +1,15 @@
+{
+  "ratios": {
+    "pick_bin": 0.28,
+    "pick_place_left": 1.0
+  },
+  "tasks": {
+    "pick_bin": [
+      "locate the yellow part and pick the part from the bin"
+    ],
+    "pick_place_left": [
+      "locate the ecu part and using the left arm pick the part from the current card board boxes and drop it on other card board box located near to it.",
+      "locate the box with blue color hankerchief and use the left arm to pick the box and drop it"
+    ]
+  }
+}

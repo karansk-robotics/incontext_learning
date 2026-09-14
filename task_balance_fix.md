@@ -1,5 +1,11 @@
 # Fixing the `ylw2` imbalance — can we cut the long episodes?
 
+> **STATUS: the `task_grouping` fix in §6 is applied and verified on `zeux`.**
+> Measured by counting `SequenceDataset.steps` on the train split:
+> `ylw2` **58.9% → 28.3%**, `ecu` 21.1% → 36.7%, `box` 20.1% → 35.0%.
+> Config versioned at `config/icrt_multitask/task_grouping.json`.
+> The cut in §7 is **not** done — it addresses the window, not the balance.
+
 **Short answer: yes, and it is safe if you cut at the grasp — but cutting fixes a
 different problem than the one you asked it to fix.**
 
@@ -194,6 +200,23 @@ Then launch as usual. Confirm it took effect — the loader prints it:
 Each task is rebalanced to have length:  37
 overriding with known ratio:  {'pick_bin': 0.28, 'pick_place_left': 1.0}
 ```
+
+**Applied 2026-09-14.** `dataset_config.json` was backed up to
+`dataset_config.json.bak` first. Verified by instantiating `SequenceDataset`
+against `runs/mt21_gpu/run.yaml` and counting frames per task in `ds.steps`:
+
+```
+          before    after     (predicted 27.9%)
+ylw2      58.9%     28.3%
+ecu       21.1%     36.7%
+box       20.1%     35.0%
+total              34,525 frames/epoch
+```
+
+Note the epoch is now ~34.5k frames against ~60k before — the imbalance was
+being "fixed" by oversampling `ylw2` with replacement, and removing that removes
+duplicated frames rather than adding new ones. Epoch wall-clock should drop
+roughly in proportion.
 
 **Change nothing else in that run** (`training_tips.md` §D3). The action head is
 the more promising lever, but running both at once makes neither attributable.
