@@ -195,7 +195,14 @@ it is the *safe* configuration at inference. Worth stating precisely in the pape
 "21-D (20 actuated in this campaign; the torso lift is in the space but held fixed
 throughout these recordings)."
 
-**Servo lag.** The commanded action leads the measured state by **2–4 cm** on the
+**Servo lag — and it is NOT uniform across sessions.** See
+`action_target_fix.md`: the leader-follower gap is 21.1 mm on `box`, 38.4 mm on
+`ecu` and **0.75 mm** on `ylw2`, a property of controller tuning on the day. That
+made the training target mean three different things and is now fixed by taking
+the target from the achieved pose one step ahead. The note below describes the
+OLD leader-command target.
+
+The commanded action leads the measured state by **2–4 cm** on the
 working arm (`|action − observation|` mean 0.0207 m left, 0.0012 m right). The
 model is trained to predict this, so it is not unfair scoring — but "exact" is not
 the target. A perfect policy reproduces the *commands*. The useful goal is beating

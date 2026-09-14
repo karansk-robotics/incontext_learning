@@ -301,6 +301,7 @@ def convert(
     target_fps: Optional[float] = None,
     episode_prefix: str = '',
     append: bool = False,
+    action_source: str = 'leader',
 ) -> None:
     import h5py
     try:
@@ -376,6 +377,30 @@ def convert(
 
             action_j = cols['action'][::stride]
             state_j = cols['observation.state'][::stride]
+
+            # ACTION SOURCE. `action` is the LEADER's command; `observation.state`
+            # is what the follower achieved. They differ by the servo lag -- and
+            # that lag is a property of the controller tuning on the day, not of
+            # the task.
+            #
+            # Measured across our three recording sessions:
+            #     box    |action - state|  0.006736 rad   21.1 mm at the hand
+            #     ecu                      0.009399 rad   38.4 mm
+            #     ylw2                     0.000223 rad    0.75 mm   <- 30-40x less
+            #
+            # ICRT's target is action[t+j] - proprio[t]. With the leader source
+            # that target is ~21-38 mm of servo lag for two tasks and ~0.75 mm for
+            # the third, so "action" means something different depending on which
+            # session recorded it. The model cannot tell the regimes apart and
+            # emits a roughly constant ~22 mm delta everywhere -- correct for box,
+            # 55x too large for ylw2.
+            #
+            # 'achieved' takes the target from where the arm actually went, one
+            # step ahead, so the label is real motion and is independent of how
+            # well the controller was tracking. It is also the thing a policy
+            # should output: the next pose, leaving the servo to close the gap.
+            if action_source == 'achieved':
+                action_j = np.concatenate([state_j[1:], state_j[-1:]], axis=0)
             if stride > 1:
                 images = {k: v[::stride] for k, v in images.items()}
             T = min(len(action_j), len(state_j), *(len(v) for v in images.values()))
@@ -522,6 +547,11 @@ def main() -> None:
                          'datasets, which all number from episode_000000')
     ap.add_argument('--append', action='store_true',
                     help='add to an existing converted set instead of replacing it')
+    ap.add_argument('--action-source', choices=('leader', 'achieved'),
+                    default='leader',
+                    help="'leader' uses the recorded command (original behaviour); "
+                         "'achieved' uses the follower pose one step ahead, which "
+                         "removes per-session servo lag from the target")
     ap.add_argument('--target-fps', type=float, default=None,
                     help='subsample to approximately this rate (ICRT assumes ~15)')
     ap.add_argument('--camera-map', nargs='*', default=None,
@@ -534,7 +564,7 @@ def main() -> None:
         cam_map = dict(kv.split('=', 1) for kv in a.camera_map)
     convert(a.lerobot_root, a.out_dir, tuple(a.image_size), a.urdf,
             a.hdf5_name, a.limit, a.prompt_dir, cam_map, a.target_fps,
-            a.episode_prefix, a.append)
+            a.episode_prefix, a.append, a.action_source)
 
 
 if __name__ == '__main__':
