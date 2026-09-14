@@ -98,6 +98,9 @@ main{display:grid;flex:1;grid-template-columns:minmax(272px,318px) 1fr;
 label{display:block;margin:11px 0 4px;font-size:11px;color:var(--muted);
       letter-spacing:.01em}
 label .sub{font-size:10px}
+.warn.banner{margin:12px 18px 0;padding:9px 12px;font-size:12px;line-height:1.6}
+.warn.banner code{background:color-mix(in srgb,var(--warn) 14%,transparent);
+      padding:1px 5px;border-radius:4px;font-size:11px}
 .cond{margin:12px 0 2px;padding:9px 11px;border-radius:8px;font-size:11.5px;
       line-height:1.5;border:1px solid var(--line);color:var(--muted)}
 .cond.ok{border-color:var(--ok);color:var(--ok)}
@@ -261,6 +264,7 @@ svg.spark{width:100%;height:46px;margin-top:9px;display:block}
       <label class="check"><input type="checkbox" id="t_rebal">
         rebalance-tasks <span class="sub">— resamples every task to a common
         length; pointless on one task, reshapes a real multi-task set</span></label>
+      <div class="hint" id="t_dimnote"></div>
       <div class="hint" id="t_cost"></div>
       <div id="t_warn"></div>
       <button class="go" data-run="train">Start training</button>
@@ -351,13 +355,11 @@ async function refresh() {
   }
   const I = STATE.interpreter || {};
   $('#interp').innerHTML = I.ok === false
-    ? `<div class="warn" style="margin:12px 16px 0">
-         <strong>This interpreter is missing modules the jobs need.</strong>
-         <ul>${Object.entries(I.breaks||{}).map(([k,v])=>
-           `<li><code>${k}</code> — breaks ${v}</li>`).join('')}</ul>
-         Jobs are spawned with <code>${I.path}</code>, so those will fail with
-         ModuleNotFoundError. The container has all of them:
-         <br><code>./container.sh exec "python -m aiworker_icrt.ui --host 0.0.0.0"</code>
+    ? `<div class="warn banner">
+         <b>Wrong interpreter — jobs will fail.</b>
+         Missing ${Object.keys(I.breaks || {}).map(k => `<code>${k}</code>`).join(' ')}
+         in <code>${I.path}</code>. Run it in the container instead:
+         <code>./container.sh exec "python -m aiworker_icrt.ui --host 0.0.0.0"</code>
        </div>` : '';
   $('#srcs').innerHTML = STATE.sources.map(s => `<option value="${s}">`).join('');
 
@@ -441,6 +443,20 @@ function syncDataset() {
     const dims = t.legacy_dims
       ? ` · <span style="color:var(--warn)">20-D (pre-23/21) — re-convert before training</span>`
       : ` · proprio_extra ${t.dims.proprio_extra} · action_extra ${t.dims.action_extra}`;
+    // Derive the extra-dim fields FROM THE DATASET, the same way seq-length and
+    // maximum-length are derived. A hardcoded 3 was right for one conversion and
+    // wrong for the next: icrt_multitask carries only lift_joint (1), because
+    // head angle identifies the task and putting it in proprio would hand the
+    // model the answer. The dataset knows; the form should not guess.
+    if (t.dims) {
+      $('#t_pex').value = t.dims.proprio_extra;
+      $('#t_aex').value = t.dims.action_extra;
+      const nm = t.dim_names;
+      $('#t_dimnote').textContent = nm
+        ? `from the dataset — proprio adds [${(nm.proprio_extra || []).join(', ')}], ` +
+          `action adds [${(nm.action_extra || []).join(', ')}]`
+        : '';
+    } else { $('#t_dimnote').textContent = ''; }
     $('#t_facts').innerHTML =
       `${t.n_episodes} episodes · lengths ${t.len_min}–${t.len_max} frames · ` +
       `${t.tasks.length} tasks${thin}${dims}`;

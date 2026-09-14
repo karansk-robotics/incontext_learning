@@ -97,7 +97,7 @@ SLICE_CART_R = slice(10, 20)
 PROPRIO_EXTRA = [LIFT_JOINT]                    # 1
 ACTION_EXTRA = [LIFT_JOINT]                     # 1
 
-PROPRIO_DIM = CARTESIAN_DIM + len(PROPRIO_EXTRA)   # 23
+PROPRIO_DIM = CARTESIAN_DIM + len(PROPRIO_EXTRA)   # 21 (was 23 when head was included)
 ACTION_DIM = CARTESIAN_DIM + len(ACTION_EXTRA)     # 21 (before ICRT's eos channel)
 
 # Slices into the extra tail. Index into the 22-D recorded joint vector that each
