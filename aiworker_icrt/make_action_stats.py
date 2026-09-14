@@ -76,7 +76,29 @@ def main() -> None:
     chunks = []
     with h5py.File(h5path, 'r') as h5:
         eps = split if split else sorted(h5.keys())
+        # A split file whose episode names have drifted from the hdf5 is the
+        # worst kind of wrong here: the mismatched names are dropped silently and
+        # the statistics are computed over whatever happens to survive.
+        #
+        # This actually happened. A stale /dev/shm/train_split.json from before
+        # split_episodes.py renamed the ylw2 episodes left 85 of 114 names
+        # resolving -- exactly the box and ecu episodes. The result excluded the
+        # only task whose WORKING arm is the right one, so the right arm's std
+        # came out as idle-arm sensor noise (0.0026-0.0073 m). Scaling by that
+        # would have amplified ylw2's real 5.9 mm/frame right-arm motion ~100x,
+        # and nothing would have raised.
+        missing = [e for e in eps if e not in h5]
+        if missing and split is not None:
+            raise SystemExit(
+                f'{len(missing)} of {len(eps)} episodes in '
+                f'{ds_dir.parent / "train_split.json"} are not in {h5path}.\n'
+                f'  first missing: {missing[:3]}\n'
+                f'  Statistics computed over the survivors would silently cover '
+                f'only part of the dataset. Point at the right split file, or '
+                f'remove the stale one.')
         eps = [e for e in eps if e in h5]
+        print(f'{len(eps)} episodes'
+              f'{" (from train_split.json)" if split else " (ALL -- no split file)"}')
         for ep in eps:
             g = h5[ep]
             a = torch.tensor(g['action/cartesian_position'][:], dtype=torch.float64)
